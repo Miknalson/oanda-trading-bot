@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>OANDA Scanner</title>
+  <meta name="theme-color" content="#0b0f14" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Scanner de volatilité</h1>
+    <span id="env-badge" class="badge">…</span>
+  </header>
+
+  <main>
+    <div class="controls">
+      <label>
+        Intervalle
+        <select id="granularity">
+          <option value="M1">1 min</option>
+          <option value="M5" selected>5 min</option>
+          <option value="M15">15 min</option>
+          <option value="H1">1 h</option>
+        </select>
+      </label>
+      <button id="refresh">Rafraîchir</button>
+    </div>
+
+    <p id="status" class="status"></p>
+
+    <ul id="results" class="results"></ul>
+  </main>
+
+  <p class="disclaimer">
+    Phase 1 — lecture seule. Aucun ordre n'est passé automatiquement depuis cette app.
+  </p>
+
+  <script src="app.js"></script>
+</body>
+</html>
