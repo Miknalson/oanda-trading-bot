@@ -90,3 +90,69 @@ button:active { opacity: 0.8; }
   font-size: 0.75rem;
   padding: 1rem;
 }
+
+.disclaimer.strong {
+  color: var(--danger);
+  text-align: left;
+  border: 1px solid var(--danger);
+  border-radius: 0.5rem;
+  padding: 0.6rem 0.8rem;
+  margin: 0.8rem 0;
+}
+
+.hidden { display: none; }
+
+.results li.clickable { cursor: pointer; }
+.results li.empty { color: var(--muted); justify-content: center; }
+
+.suggestion, #positions-panel {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.suggestion h2, #positions-panel h2 { font-size: 1rem; margin-bottom: 0.75rem; }
+
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.field-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.field-row input {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.suggestion-result {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  margin-top: 1rem;
+}
+
+.suggestion-result p { margin: 0.3rem 0; font-size: 0.9rem; }
+.suggestion-result .rationale { color: var(--muted); font-size: 0.8rem; }
+
+button.launch {
+  width: 100%;
+  background: var(--accent);
+  color: #06110d;
+  font-weight: 700;
+  padding: 0.8rem;
+  margin-top: 0.5rem;
+}

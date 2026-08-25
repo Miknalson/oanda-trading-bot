@@ -31,10 +31,50 @@
     <p id="status" class="status"></p>
 
     <ul id="results" class="results"></ul>
+
+    <section id="suggestion-panel" class="suggestion hidden">
+      <h2>Suggestion de trade — <span id="sug-instrument"></span></h2>
+
+      <div class="field-row">
+        <label>
+          Risque par trade (%)
+          <input id="risk-pct" type="number" min="0.1" max="2" step="0.1" value="1" />
+        </label>
+        <label>
+          Objectif de gain (dans ta devise de compte)
+          <input id="objective-amount" type="number" min="1" step="1" value="20" />
+        </label>
+      </div>
+      <button id="analyze">Analyser</button>
+
+      <div id="suggestion-result" class="suggestion-result hidden">
+        <p><strong>Direction :</strong> <span id="s-direction"></span></p>
+        <p><strong>Entrée :</strong> <span id="s-entry"></span></p>
+        <p><strong>Stop-loss :</strong> <span id="s-sl"></span></p>
+        <p><strong>Take-profit :</strong> <span id="s-tp"></span></p>
+        <p><strong>Taille :</strong> <span id="s-units"></span> unités</p>
+        <p><strong>Montant risqué :</strong> <span id="s-risk"></span></p>
+        <p><strong>Ratio gain/risque :</strong> <span id="s-ratio"></span></p>
+        <p class="rationale" id="s-rationale"></p>
+        <p class="disclaimer strong">
+          Aucune garantie de résultat. En cliquant "Lancer", tu places un ordre
+          réel avec ce stop-loss et ce take-profit attachés — le bot ne fera
+          plus rien après, OANDA ferme la position automatiquement à l'un des
+          deux prix.
+        </p>
+        <button id="launch" class="launch">Lancer le trade</button>
+      </div>
+    </section>
+
+    <section id="positions-panel">
+      <h2>Positions ouvertes</h2>
+      <ul id="positions" class="results"></ul>
+    </section>
   </main>
 
   <p class="disclaimer">
-    Phase 1 — lecture seule. Aucun ordre n'est passé automatiquement depuis cette app.
+    Phase 3 — un ordre n'est envoyé que lorsque tu cliques explicitement
+    "Lancer le trade" ci-dessus. Le bot ne trade jamais sans ta confirmation.
   </p>
 
   <script src="app.js"></script>

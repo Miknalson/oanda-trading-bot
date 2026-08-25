@@ -1,8 +1,9 @@
 """Client HTTP minimal pour l'API REST v20 d'OANDA.
 
-Phase 1 : uniquement des appels en LECTURE SEULE (liste des instruments,
-bougies de prix). Aucune fonction de passage d'ordre n'est implémentée ici
-volontairement — voir le README pour la feuille de route par phases.
+Contient à la fois les appels en lecture seule (instruments, bougies,
+solde de compte, positions ouvertes) et le passage d'ordre (Phase 3).
+Le passage d'ordre est protégé côté application par `Settings.orders_allowed`
+— voir main.py — jamais directement ici.
 
 Doc officielle : https://developer.oanda.com/rest-live-v20/introduction/
 """
@@ -58,3 +59,59 @@ class OandaClient:
         if resp.status_code != 200:
             raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
         return resp.json().get("candles", [])
+
+    async def get_account_summary(self) -> dict:
+        """Solde, devise et P/L non réalisé du compte."""
+        url = (
+            f"{self.settings.oanda_base_url}/v3/accounts/"
+            f"{self.settings.oanda_account_id}/summary"
+        )
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers=self._headers())
+        if resp.status_code != 200:
+            raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
+        return resp.json().get("account", {})
+
+    async def list_open_trades(self) -> list[dict]:
+        url = (
+            f"{self.settings.oanda_base_url}/v3/accounts/"
+            f"{self.settings.oanda_account_id}/openTrades"
+        )
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers=self._headers())
+        if resp.status_code != 200:
+            raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
+        return resp.json().get("trades", [])
+
+    async def create_market_order_with_brackets(
+        self,
+        instrument: str,
+        units: int,
+        stop_loss_price: float,
+        take_profit_price: float,
+    ) -> dict:
+        """Passe un ordre au marché avec stop-loss ET take-profit attachés.
+
+        C'est OANDA qui gère la fermeture automatique de la position une
+        fois l'un des deux prix atteint — ça ne dépend pas de notre serveur
+        qui pourrait être arrêté ou injoignable à ce moment-là.
+
+        `units` positif = achat, négatif = vente.
+        """
+        url = f"{self.settings.oanda_base_url}/v3/accounts/{self.settings.oanda_account_id}/orders"
+        body = {
+            "order": {
+                "type": "MARKET",
+                "instrument": instrument,
+                "units": str(units),
+                "timeInForce": "FOK",
+                "positionFill": "DEFAULT",
+                "stopLossOnFill": {"price": f"{stop_loss_price:.5f}"},
+                "takeProfitOnFill": {"price": f"{take_profit_price:.5f}"},
+            }
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, headers=self._headers(), json=body)
+        if resp.status_code not in (200, 201):
+            raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
+        return resp.json()

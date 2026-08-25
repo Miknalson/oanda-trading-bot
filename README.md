@@ -13,8 +13,31 @@ Scanner de volatilité + assistant de trading via l'[API REST v20 d'OANDA](https
 | Phase | Statut | Description |
 |---|---|---|
 | **1 — Scanner** | ✅ fait | Lecture seule : identifie les instruments les plus volatils. Aucun ordre passé. |
-| **2 — Validation manuelle** | 🔜 à venir | L'app propose un trade, toi seul confirmes l'exécution. |
-| **3 — Semi-automatique** | 🔜 à venir | Exécution automatique jusqu'à un objectif de gain, avec stop-loss obligatoire et garde-fous (montant max engagé, confirmation du premier ordre). |
+| **2 — Validation manuelle** | ⏭️ sautée | On est passés directement à la Phase 3 avec garde-fous stricts (voir ci-dessous). |
+| **3 — Semi-automatique** | ✅ fait (v1) | Analyse tendance + volatilité, suggère direction/stop-loss/take-profit/taille de position selon ton risque, **un seul clic** ("Lancer") ouvre l'ordre avec stop-loss et take-profit attachés — OANDA ferme la position tout seul à l'un des deux. |
+
+### ⚠️ Sur la fiabilité de la Phase 3 — à lire avant d'activer le live
+
+Le moteur de suggestion utilise des indicateurs techniques classiques (moyennes
+mobiles pour la tendance, ATR pour la volatilité). **Ce ne sont que des
+heuristiques** : aucune stratégie de trading ne garantit un taux de réussite
+donné, et personne ne peut promettre 50-60% ni aucun autre chiffre à l'avance.
+Le code vise une **gestion du risque rigoureuse** (jamais plus de 2% du solde
+risqué par trade, plafond appliqué côté serveur, stop-loss obligatoire sur
+chaque ordre), pas une martingale magique.
+
+Garde-fous en place :
+- `MAX_RISK_PCT` (backend/.env) plafonne le risque par trade côté serveur, quoi
+  que le client demande
+- `LIVE_TRADING_CONFIRMED=false` par défaut : aucun ordre réel n'est envoyé en
+  environnement `live` tant que tu n'actives pas ce flag explicitement
+- Chaque ordre passe par un stop-loss ET un take-profit attachés — jamais de
+  position "nue" sans limite de perte
+- Aucun ordre n'est jamais envoyé sans que tu cliques "Lancer" dans l'app
+  (`confirm: true` obligatoire dans la requête)
+
+**Teste toujours en `practice` (compte démo) d'abord**, sur plusieurs
+instruments et plusieurs jours, avant d'envisager le `live`.
 
 ## Architecture
 
