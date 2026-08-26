@@ -116,6 +116,67 @@ d'exécution réel, donc une perte au stop vaut bien `risk_pct` du solde.
 - Le scanner classe par volatilité, ce qui n'est pas un classement par coût :
   vérifie toujours le `spread_pct_of_risk` de la suggestion avant de lancer.
 
+## Backtest : mesurer au lieu de supposer
+
+```bash
+cd backend
+.venv/bin/python -m app.backtest --instrument EUR_USD --granularity H1 --count 5000
+```
+
+Le backtest rejoue la stratégie sur l'historique OANDA et mesure le taux de
+réussite **réel**, frais compris. Il réutilise les fonctions de
+`indicators.py` — les mêmes qu'en production. Backtester une logique
+différente de celle qui tradera ne prouverait rien.
+
+### Deux règles qui font la différence entre une mesure et une illusion
+
+**Aucun regard vers le futur.** À la bougie `i`, seules les bougies `0..i`
+sont visibles, et l'entrée se fait à l'ouverture de `i+1`. Un test vérifie
+que les décisions passées ne changent pas quand on ajoute des bougies
+futures.
+
+**Le spread se paie en pertes plus fréquentes, pas en déduction.** On achète
+au `ask` et on revend au `bid` : le stop se déclenche *plus tôt*
+(`entrée - distance + spread`) et l'objectif *plus tard*
+(`entrée + cible + spread`). Le gain et la perte en euros restent exacts, le
+seuil d'équilibre reste `1/(1+ratio)`, et c'est le taux de réussite mesuré
+qui baisse. Une première version déduisait le spread du P/L tout en
+comparant les niveaux sur les prix médians : le coût n'était compté qu'à
+moitié et le backtest affichait un P/L positif avec un taux sous le seuil —
+arithmétiquement impossible.
+
+### Validation du backtester
+
+Le test décisif : sur une **marche aléatoire** (aucun avantage exploitable),
+un ratio de 1,5 impose mathématiquement ~40 % de réussite. Le backtester
+mesure **39,7 %**. Un outil qui regarderait le futur afficherait bien plus.
+
+Autres garde-fous testés : une bougie touchant stop *et* objectif compte en
+perte (on ne sait pas lequel est arrivé en premier) ; le spread dégrade
+toujours réussite et P/L ; le P/L est cohérent avec le taux de réussite
+mesuré ; un spread ruineux n'ouvre aucun trade.
+
+### Ce que disent les premiers résultats
+
+Sur données synthétiques couvrant l'éventail des comportements de marché
+plausibles (EUR/USD, spread 1,2 pip, ratio 1,5, seuil 40 %) :
+
+| Persistance des tendances | Réussite | P/L net | |
+|---|---|---|---|
+| 0,0 (marche aléatoire) | 37,2 % | −124 € | ❌ |
+| 0,2 | 37,7 % | −94 € | ❌ |
+| 0,4 | 37,6 % | −71 € | ❌ |
+| 0,5 | 38,4 % | −33 € | ❌ |
+| 0,6 (tendances très marquées) | 40,2 % | +2 € | ✅ |
+
+La stratégie n'atteint l'équilibre qu'avec une persistance de tendance
+extrême. Les marchés de change réels s'en approchent rarement sur les
+intervalles courts.
+
+**Ces chiffres viennent de données simulées, pas du marché.** Le verdict
+réel demande l'historique OANDA, donc une clé API. La commande ci-dessus le
+produira.
+
 ## Notifications : paliers 25 / 50 / 75 / 100 %
 
 Pendant une session, tu es notifié à chaque quart de progression — dans les
@@ -168,6 +229,7 @@ cd backend
 .venv/bin/python tests/test_session_limits.py
 .venv/bin/python tests/test_milestones.py
 .venv/bin/python tests/test_spread.py
+.venv/bin/python tests/test_backtest.py
 ```
 
 Les tests utilisent un faux client OANDA (aucun réseau, aucun argent) et
