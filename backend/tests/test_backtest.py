@@ -145,9 +145,11 @@ def test_pl_and_win_rate_are_consistent():
     r = run_backtest(random_walk(6000, seed=21), spread=0.00012,
                      reward_ratio=1.5, risk_amount=2.5)
     n, w = len(r.closed), r.wins
-    attendu = w * (2.5 * 1.5) - (n - w) * 2.5
+    # Résultat = marché (±montants exacts) + financement (un coût déduit).
+    attendu = w * (2.5 * 1.5) - (n - w) * 2.5 + r.total_financing
     assert abs(r.net_pl - attendu) < 0.01, (
-        f"P/L {r.net_pl:+.2f} incohérent avec {w}/{n} gagnants (attendu {attendu:+.2f})"
+        f"P/L {r.net_pl:+.2f} incohérent avec {w}/{n} gagnants "
+        f"et {r.total_financing:+.2f} de financement (attendu {attendu:+.2f})"
     )
     # Et le signe doit suivre la position par rapport au seuil.
     if r.win_rate < r.breakeven_win_rate:
@@ -156,7 +158,8 @@ def test_pl_and_win_rate_are_consistent():
             f"mais P/L {r.net_pl:+.2f} positif — impossible"
         )
     print(
-        f"  {w}/{n} gagnants ({r.win_rate:.1%}) -> P/L {r.net_pl:+.2f}, "
+        f"  {w}/{n} gagnants ({r.win_rate:.1%}) -> P/L {r.net_pl:+.2f} "
+        f"(dont {r.total_financing:+.2f} de financement), "
         f"cohérent avec le seuil de {r.breakeven_win_rate:.1%}"
     )
 
@@ -175,6 +178,57 @@ def test_max_drawdown_is_negative_or_zero():
     result = run_backtest(random_walk(4000, seed=5), spread=0.00012)
     assert result.max_drawdown <= 0, result.max_drawdown
     print(f"  pire recul mesuré: {result.max_drawdown:.2f}")
+
+
+
+def test_financing_is_charged_and_hurts():
+    """Le financement doit réduire le P/L et relever le seuil d'équilibre."""
+    candles = random_walk(5000, seed=31)
+    free = run_backtest(candles, spread=0.00012, granularity="H4",
+                        financing_rate_annual=0.0)
+    costly = run_backtest(candles, spread=0.00012, granularity="H4",
+                          financing_rate_annual=0.02)
+
+    assert free.total_financing == 0.0, free.total_financing
+    assert costly.total_financing < 0, "le financement doit être un coût (négatif)"
+    assert costly.net_pl < free.net_pl, (
+        f"le financement n'a pas dégradé le P/L "
+        f"({free.net_pl:+.2f} -> {costly.net_pl:+.2f})"
+    )
+    assert costly.breakeven_win_rate > free.breakeven_win_rate, (
+        "le seuil d'équilibre doit monter avec le financement"
+    )
+    print(
+        f"  sans financement {free.net_pl:+.2f} (seuil {free.breakeven_win_rate:.1%}) -> "
+        f"avec {costly.net_pl:+.2f} (seuil {costly.breakeven_win_rate:.1%}, "
+        f"{costly.total_financing:+.2f} d'intérêts)"
+    )
+
+
+def test_financing_grows_with_timeframe():
+    """Plus l'intervalle est long, plus la détention coûte cher."""
+    candles = random_walk(5000, seed=33)
+    couts = {}
+    for g in ("M15", "H1", "H4"):
+        r = run_backtest(candles, spread=0.00012, granularity=g,
+                         financing_rate_annual=0.02)
+        if r.closed:
+            couts[g] = -r.total_financing / len(r.closed)
+
+    assert set(couts) == {"M15", "H1", "H4"}, couts
+    assert couts["M15"] < couts["H1"] < couts["H4"], (
+        f"le coût par trade devrait croître avec l'intervalle : {couts}"
+    )
+    print("  coût de détention par trade: " + ", ".join(
+        f"{g} {c:.4f}" for g, c in couts.items()
+    ))
+
+
+def test_financing_is_zero_when_rate_is_zero():
+    r = run_backtest(random_walk(3000, seed=35), spread=0.00012,
+                     granularity="H4", financing_rate_annual=0.0)
+    assert all(t.financing == 0.0 for t in r.closed)
+    print("  taux nul -> aucun coût de détention, comme attendu")
 
 
 if __name__ == "__main__":

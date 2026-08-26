@@ -47,7 +47,13 @@ class SessionTrade:
     entry_price: float
     stop_loss_price: float
     take_profit_price: float
+    # `realized_pl` est le résultat NET : marché + financement.
+    # Les deux composantes sont conservées séparément parce qu'elles ne se
+    # pilotent pas pareil — le financement dépend du temps de détention, pas
+    # de la justesse du trade.
     realized_pl: float | None = None
+    market_pl: float | None = None
+    financing: float | None = None
     closed: bool = False
     opened_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -75,6 +81,11 @@ class TradingSession:
     def is_active(self) -> bool:
         return self.status == "running"
 
+    @property
+    def total_financing(self) -> float:
+        """Intérêts payés (négatif) ou perçus pour la détention des positions."""
+        return sum(t.financing or 0.0 for t in self.trades)
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -82,6 +93,7 @@ class TradingSession:
             "status": self.status,
             "stop_reason": self.stop_reason,
             "realized_pl": round(self.realized_pl, 2),
+            "total_financing": round(self.total_financing, 2),
             "objective_amount": self.objective_amount,
             "max_loss_amount": self.max_loss_amount,
             "risk_pct": self.risk_pct,
@@ -331,7 +343,14 @@ class SessionManager:
             )
 
     async def _wait_for_close(self, trade: SessionTrade) -> float | None:
-        """Attend la fermeture du trade chez OANDA, renvoie son P/L réalisé."""
+        """Attend la fermeture du trade chez OANDA, renvoie son résultat NET.
+
+        OANDA sépare `realizedPL` (le résultat de marché) et `financing`
+        (les intérêts payés ou perçus pour avoir gardé la position ouverte,
+        facturés chaque nuit). Ne lire que le premier sous-estime le coût
+        réel : sur H1/H4 un trade traverse souvent une ou plusieurs nuits.
+        Le total est donc la somme des deux.
+        """
         waited = 0.0
         poll = self.settings.session_poll_seconds
         while waited < TRADE_TIMEOUT_SECONDS:
@@ -339,5 +358,9 @@ class SessionManager:
             waited += poll
             detail = await self.client.get_trade(trade.trade_id)
             if detail.get("state") == "CLOSED":
-                return float(detail.get("realizedPL", 0))
+                market_pl = float(detail.get("realizedPL", 0))
+                financing = float(detail.get("financing", 0))
+                trade.market_pl = market_pl
+                trade.financing = financing
+                return market_pl + financing
         return None

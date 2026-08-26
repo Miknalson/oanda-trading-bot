@@ -65,7 +65,7 @@ boucle s'arrête, le trade en cours reste protégé.
 
 Les garde-fous actifs sont lisibles sur `GET /api/limits`.
 
-## Frais : le spread, et pourquoi l'intervalle compte plus que tout
+## Frais : deux coûts qui tirent en sens opposé
 
 Sur OANDA (comptes standard) il n'y a pas de commission : le coût est le
 **spread**, l'écart entre le prix d'achat et de vente, payé à chaque ouverture
@@ -107,12 +107,46 @@ de l'arithmétique.
 Le montant risqué reste exact : stop et objectif sont placés depuis le prix
 d'exécution réel, donc une perte au stop vaut bien `risk_pct` du solde.
 
+## Le second frais : le financement
+
+Le spread n'est pas le seul coût. OANDA facture des **intérêts de détention**
+(le « swap ») sur toute position gardée après 17 h heure de New York. Deux
+différences avec le spread :
+
+- il se **déduit vraiment** du résultat, alors que le spread se paie en pertes
+  plus fréquentes ;
+- il **grandit avec la durée de détention**, alors que le spread est payé une
+  seule fois à l'ouverture.
+
+Dans l'API OANDA, `realizedPL` et `financing` sont deux champs **séparés** :
+ne lire que le premier sous-estime le coût réel. Le code lit les deux et les
+additionne, et `SessionTrade` conserve `market_pl` et `financing`
+distinctement — ils ne se pilotent pas pareil : l'un dépend de la justesse du
+trade, l'autre du temps passé en position.
+
+### Les deux frais s'opposent, et l'optimum n'est pas au bout du spectre
+
+| Intervalle | Spread (% du risque) | Financement/trade | Seuil d'équilibre |
+|---|---|---|---|
+| H1 | 14 % | 0,048 € | **40,8 %** ✅ |
+| H4 | 7 % | 0,097 € | 41,6 % |
+| D | 3 % | 0,249 € | 44,0 % |
+
+Allonger l'intervalle élargit le stop et **réduit** le poids du spread, mais
+garde la position plus longtemps et **augmente** le financement. Le meilleur
+compromis n'est donc ni au plus court ni au plus long : dans ce modèle c'est
+**H1** qui exige le taux de réussite le plus bas.
+
+Le backtest modélise les deux (`--financing 0.02` par défaut ; `0` pour
+isoler l'effet du seul spread).
+
 ### Recommandations
 
-- **H1 minimum.** Jamais M1, et M5 seulement en connaissance de cause.
+- **H1** comme point de départ : le meilleur compromis entre les deux frais.
+  Jamais M1, et M5 seulement en connaissance de cause.
 - **Objectif modeste** : viser 20 € par session avec 2,50 € de risque par trade
-  demanderait ~26 trades même sur H1 — au-dessus du plafond de 20. Un objectif
-  de 5 € est autrement plus atteignable.
+  demanderait ~26 trades — au-dessus du plafond de 20. Un objectif de 5 € est
+  autrement plus atteignable.
 - Le scanner classe par volatilité, ce qui n'est pas un classement par coût :
   vérifie toujours le `spread_pct_of_risk` de la suggestion avant de lancer.
 

@@ -27,6 +27,12 @@ Le gain et la perte en euros restent exacts (`+ratio x risque` ou `-risque`) :
 le coût du spread ne se déduit pas du résultat de chaque trade, il se paie en
 **perdant plus souvent**. C'est pour ça que le seuil d'équilibre reste
 `1/(1+ratio)` et que c'est le taux de réussite mesuré qui, lui, baisse.
+
+Le **financement** est le second frais, distinct du spread : OANDA facture des
+intérêts sur toute position gardée après 17h à New York. Contrairement au
+spread, il se déduit bien du résultat, et il grandit avec la durée de
+détention — donc il pèse d'autant plus que l'intervalle est long. Sur H4, un
+trade traverse souvent plusieurs nuits.
 """
 from __future__ import annotations
 
@@ -40,6 +46,12 @@ from .indicators import atr, trend_direction
 # Périodes des indicateurs — doivent rester alignées sur indicators.py.
 FAST_PERIOD, SLOW_PERIOD, ATR_PERIOD = 20, 50, 14
 
+# Durée d'une bougie en heures, pour estimer le nombre de nuits traversées.
+GRANULARITY_HOURS = {
+    "M1": 1 / 60, "M5": 5 / 60, "M15": 0.25, "M30": 0.5,
+    "H1": 1.0, "H4": 4.0, "D": 24.0,
+}
+
 
 @dataclass
 class BacktestTrade:
@@ -51,6 +63,7 @@ class BacktestTrade:
     units: float
     pl_if_win: float = 0.0
     pl_if_loss: float = 0.0
+    financing: float = 0.0
     exit_index: int | None = None
     exit_price: float | None = None
     won: bool | None = None
@@ -67,6 +80,7 @@ class BacktestResult:
     spread: float = 0.0
     reward_ratio: float = 1.5
     risk_amount: float = 0.0
+    financing_rate_annual: float = 0.0
 
     @property
     def closed(self) -> list[BacktestTrade]:
@@ -89,6 +103,11 @@ class BacktestResult:
         return sum(t.spread_cost for t in self.closed)
 
     @property
+    def total_financing(self) -> float:
+        """Intérêts de détention, comptés en négatif (un coût)."""
+        return sum(t.financing for t in self.closed)
+
+    @property
     def expectancy(self) -> float:
         """Gain net moyen par trade — le chiffre qui décide de tout."""
         return self.net_pl / len(self.closed) if self.closed else 0.0
@@ -98,11 +117,18 @@ class BacktestResult:
         """Taux de réussite minimum pour ne pas perdre d'argent.
 
         Chaque trade rapporte exactement `+ratio x risque` ou coûte
-        `-risque`, donc le seuil vaut `1/(1+ratio)`. Le spread n'apparaît
-        pas ici : son coût se lit dans le taux de réussite MESURÉ, qu'il
-        tire vers le bas (voir l'en-tête du module).
+        `-risque`, donc le seuil vaudrait `1/(1+ratio)`. Le spread n'y
+        apparaît pas : son coût se lit dans le taux de réussite MESURÉ,
+        qu'il tire vers le bas (voir l'en-tête du module).
+
+        Le financement, lui, se déduit du résultat, donc il relève bien le
+        seuil : il faut gagner un peu plus souvent pour l'absorber.
         """
-        return 1 / (self.reward_ratio + 1)
+        base = 1 / (self.reward_ratio + 1)
+        if not self.closed or self.risk_amount <= 0:
+            return base
+        cost_per_trade = -self.total_financing / len(self.closed)
+        return (1 + cost_per_trade / self.risk_amount) / (self.reward_ratio + 1)
 
     @property
     def max_drawdown(self) -> float:
@@ -127,6 +153,8 @@ class BacktestResult:
             f"  P/L net         : {self.net_pl:+.2f}\n"
             f"  coût du spread  : {self.total_spread_cost:.2f} "
             f"(payé en pertes plus fréquentes)\n"
+            f"  financement     : {self.total_financing:+.2f} "
+            f"(déduit du résultat)\n"
             f"  par trade       : {self.expectancy:+.3f}\n"
             f"  pire recul      : {self.max_drawdown:.2f}\n"
             f"  verdict         : {verdict}"
@@ -145,8 +173,14 @@ def run_backtest(
     spread: float = 0.00012,
     reward_ratio: float = 1.5,
     risk_amount: float = 2.50,
+    financing_rate_annual: float = 0.02,
 ) -> BacktestResult:
-    """Rejoue la stratégie bougie par bougie, sans regard vers le futur."""
+    """Rejoue la stratégie bougie par bougie, sans regard vers le futur.
+
+    `financing_rate_annual` : coût annuel de détention en fraction du
+    notionnel (2 % par défaut, ordre de grandeur courant sur une paire
+    majeure). Mets 0 pour isoler l'effet du seul spread.
+    """
     result = BacktestResult(
         instrument=instrument,
         granularity=granularity,
@@ -154,7 +188,10 @@ def run_backtest(
         spread=spread,
         reward_ratio=reward_ratio,
         risk_amount=risk_amount,
+        financing_rate_annual=financing_rate_annual,
     )
+
+    bar_hours = GRANULARITY_HOURS.get(granularity, 1.0)
 
     warmup = max(SLOW_PERIOD, ATR_PERIOD) + 1
     if len(candles) <= warmup + 1:
@@ -189,7 +226,18 @@ def run_backtest(
                 # déduit ici, il est déjà payé via des niveaux décalés qui
                 # font perdre plus souvent (voir l'en-tête du module).
                 open_trade.spread_cost = spread * abs(open_trade.units)
-                open_trade.pl = open_trade.pl_if_win if won else open_trade.pl_if_loss
+
+                # Financement : proportionnel au temps de détention. Il se
+                # déduit vraiment du résultat, contrairement au spread.
+                hours_held = (i - open_trade.entry_index) * bar_hours
+                notional = abs(open_trade.units) * open_trade.entry_price
+                open_trade.financing = -(
+                    notional * financing_rate_annual * hours_held / (365 * 24)
+                )
+
+                open_trade.pl = (
+                    open_trade.pl_if_win if won else open_trade.pl_if_loss
+                ) + open_trade.financing
                 open_trade = None
             continue
 
@@ -261,6 +309,10 @@ async def _main() -> None:
     parser.add_argument("--spread", type=float, default=0.00012)
     parser.add_argument("--ratio", type=float, default=1.5)
     parser.add_argument("--risk", type=float, default=2.50)
+    parser.add_argument(
+        "--financing", type=float, default=0.02,
+        help="Coût annuel de détention, en fraction du notionnel (0 pour l'ignorer)",
+    )
     args = parser.parse_args()
 
     from .oanda_client import OandaClient
@@ -274,6 +326,7 @@ async def _main() -> None:
         spread=args.spread,
         reward_ratio=args.ratio,
         risk_amount=args.risk,
+        financing_rate_annual=args.financing,
     )
     print(result.summary())
 
