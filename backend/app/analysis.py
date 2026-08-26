@@ -43,17 +43,29 @@ class TradeAnalyzer:
         self,
         instrument: str,
         risk_pct: float,
-        objective_amount: float,
+        objective_amount: float | None = None,
         granularity: str = "M15",
         count: int = 100,
         max_risk_pct: float = 0.02,
+        reward_ratio: float | None = None,
     ) -> TradeSuggestion:
+        """Construit une proposition de trade.
+
+        Deux façons de fixer le take-profit :
+        - `reward_ratio` (mode session) : le take-profit vise `ratio x` le
+          montant risqué sur CE trade. C'est ce qu'utilise une session, qui
+          atteint son objectif en cumulant plusieurs petits trades.
+        - `objective_amount` (trade isolé) : le take-profit est placé pour
+          rapporter ce montant en une seule fois.
+        """
         if risk_pct > max_risk_pct:
             raise ValueError(
                 f"risk_pct ({risk_pct:.2%}) dépasse le plafond de sécurité ({max_risk_pct:.2%})"
             )
-        if objective_amount <= 0:
-            raise ValueError("objective_amount doit être positif")
+        if reward_ratio is None and (objective_amount is None or objective_amount <= 0):
+            raise ValueError("Fournis soit reward_ratio, soit un objective_amount positif")
+        if reward_ratio is not None and reward_ratio <= 0:
+            raise ValueError("reward_ratio doit être positif")
 
         candles = await self.client.get_candles(instrument, granularity, count)
         if len(candles) < 20:
@@ -86,10 +98,14 @@ class TradeAnalyzer:
                 "(taille calculée = 0 unité). Augmente risk_pct ou ton solde."
             )
 
-        # Distance de take-profit nécessaire pour atteindre l'objectif de
-        # gain fixé, compte tenu de la taille de position calculée.
-        take_profit_distance = objective_amount / sizing.units
+        if reward_ratio is not None:
+            # Mode session : chaque trade vise `ratio x` ce qu'il risque.
+            take_profit_distance = stop_distance * reward_ratio
+        else:
+            # Trade isolé : le take-profit doit rapporter tout l'objectif.
+            take_profit_distance = objective_amount / sizing.units
         reward_risk_ratio = take_profit_distance / stop_distance
+        expected_gain = take_profit_distance * sizing.units
 
         if direction == "buy":
             stop_loss_price = entry_price - stop_distance
@@ -121,7 +137,7 @@ class TradeAnalyzer:
             suggested_units=units,
             risk_amount=round(sizing.risk_amount, 2),
             risk_pct=risk_pct,
-            potential_gain=round(objective_amount, 2),
+            potential_gain=round(expected_gain, 2),
             reward_risk_ratio=round(reward_risk_ratio, 2),
             rationale=rationale,
         )

@@ -1,10 +1,14 @@
-"""API FastAPI — scanner de volatilité + suggestion/exécution de trade.
+"""API FastAPI — scanner, suggestion, trade isolé et sessions.
 
-Phase 3 : le passage d'ordre existe (`POST /api/orders/place`) mais reste
-protégé par plusieurs garde-fous — voir la fonction elle-même et
-`Settings.orders_allowed`. Rien n'est jamais exécuté sans un `confirm: true`
-explicite envoyé par le client (donc par toi, en cliquant "Lancer" dans
-l'app).
+Deux façons d'exécuter :
+- `POST /api/orders/place` : un seul trade, un seul ordre, puis plus rien.
+- `POST /api/sessions/start` : une session qui enchaîne plusieurs petits
+  trades vers un objectif cumulé, avec une PERTE MAX OBLIGATOIRE qui
+  l'arrête net — voir `session.py`.
+
+Dans les deux cas rien n'est exécuté sans confirmation explicite du client,
+et plusieurs plafonds serveur (risque par trade, perte max de session,
+nombre de trades) ne peuvent pas être contournés depuis l'app.
 """
 from __future__ import annotations
 
@@ -17,10 +21,11 @@ from .analysis import TradeAnalyzer
 from .config import get_settings
 from .oanda_client import OandaClient, OandaError
 from .scanner import VolatilityScanner
+from .session import SessionError, SessionManager
 
 app = FastAPI(
     title="OANDA Trading Bot — API",
-    description="Phase 1 : scanner de volatilité (lecture seule, aucune exécution d'ordre).",
+    description="Scanner de volatilité, suggestion de trade et sessions à perte max plafonnée.",
     version="0.1.0",
 )
 
@@ -29,12 +34,13 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
 _scanner: VolatilityScanner | None = None
 _client: OandaClient | None = None
+_sessions: SessionManager | None = None
 
 
 def get_client() -> OandaClient:
@@ -42,6 +48,13 @@ def get_client() -> OandaClient:
     if _client is None:
         _client = OandaClient(get_settings())
     return _client
+
+
+def get_session_manager() -> SessionManager:
+    global _sessions
+    if _sessions is None:
+        _sessions = SessionManager(get_client(), get_settings())
+    return _sessions
 
 
 def get_scanner() -> VolatilityScanner:
@@ -161,3 +174,99 @@ async def open_positions() -> dict:
     except OandaError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"trades": trades}
+
+
+class StartSessionRequest(BaseModel):
+    """Paramètres d'une session.
+
+    `max_loss_amount` n'a volontairement PAS de valeur par défaut : une
+    session ne peut pas démarrer sans que tu aies dit explicitement combien
+    tu acceptes de perdre au total. Le serveur la borne ensuite à
+    `MAX_SESSION_LOSS_PCT` du solde réel.
+    """
+
+    instrument: str
+    risk_pct: float = Field(gt=0, le=0.02, description="Fraction du solde risquée par trade")
+    objective_amount: float = Field(gt=0, description="Gain cumulé visé, en devise du compte")
+    max_loss_amount: float = Field(gt=0, description="Perte cumulée maximale — OBLIGATOIRE")
+    reward_ratio: float = Field(default=1.5, gt=0, le=5)
+    granularity: str = Field(default="M15", pattern="^(M1|M5|M15|M30|H1|H4|D)$")
+    # Confirmation explicite, comme pour un ordre isolé.
+    confirm: bool = False
+
+
+@app.post("/api/sessions/start")
+async def start_session(req: StartSessionRequest) -> dict:
+    settings = get_settings()
+
+    if not req.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="confirm doit être true — aucune session ne démarre sans confirmation explicite.",
+        )
+    if not settings.orders_allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Trading en LIVE non confirmé côté serveur. Défini "
+                "LIVE_TRADING_CONFIRMED=true dans backend/.env une fois que tu es "
+                "prêt à trader avec de l'argent réel."
+            ),
+        )
+
+    try:
+        session = await get_session_manager().start(
+            instrument=req.instrument,
+            risk_pct=req.risk_pct,
+            objective_amount=req.objective_amount,
+            max_loss_amount=req.max_loss_amount,
+            reward_ratio=req.reward_ratio,
+            granularity=req.granularity,
+        )
+    except SessionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OandaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return session.to_dict()
+
+
+@app.get("/api/sessions/active")
+async def active_session() -> dict:
+    session = get_session_manager().active_session
+    return {"session": session.to_dict() if session else None}
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(session_id: str) -> dict:
+    session = get_session_manager().sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session inconnue : {session_id}")
+    return session.to_dict()
+
+
+@app.post("/api/sessions/{session_id}/stop")
+async def stop_session(session_id: str) -> dict:
+    """Arrête la session : plus aucun nouveau trade n'est ouvert.
+
+    Un trade déjà ouvert n'est PAS fermé de force — il garde son stop-loss et
+    son take-profit chez OANDA et se fermera tout seul à l'un des deux prix.
+    """
+    try:
+        session = get_session_manager().stop(session_id)
+    except SessionError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return session.to_dict()
+
+
+@app.get("/api/limits")
+async def limits() -> dict:
+    """Les plafonds de sécurité appliqués côté serveur, pour affichage."""
+    settings = get_settings()
+    return {
+        "max_risk_pct": settings.max_risk_pct,
+        "max_session_loss_pct": settings.max_session_loss_pct,
+        "max_trades_per_session": settings.max_trades_per_session,
+        "orders_allowed": settings.orders_allowed,
+        "environment": settings.oanda_environment,
+    }

@@ -115,3 +115,20 @@ class OandaClient:
         if resp.status_code not in (200, 201):
             raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
         return resp.json()
+
+    async def get_trade(self, trade_id: str) -> dict:
+        """État d'un trade précis : "OPEN" ou "CLOSED", et son P/L réalisé.
+
+        C'est ce qui permet à une session de savoir quand le stop-loss ou le
+        take-profit a été touché, et combien le trade a réellement rapporté
+        ou coûté — sans se fier à une estimation locale.
+        """
+        url = (
+            f"{self.settings.oanda_base_url}/v3/accounts/"
+            f"{self.settings.oanda_account_id}/trades/{trade_id}"
+        )
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers=self._headers())
+        if resp.status_code != 200:
+            raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
+        return resp.json().get("trade", {})

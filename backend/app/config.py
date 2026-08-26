@@ -27,6 +27,17 @@ class Settings:
     # Plafond serveur : aucune requête ne peut faire risquer plus que ça sur
     # un seul trade, quel que soit le risk_pct demandé par le client.
     max_risk_pct: float
+    # Plafond serveur sur la perte cumulée d'UNE session (fraction du solde).
+    # Une session enchaîne plusieurs trades ; sans ce plafond une série de
+    # pertes pourrait éroder tout le compte. Le client doit fournir sa propre
+    # perte max, qui est ensuite bornée par celle-ci.
+    max_session_loss_pct: float
+    # Nombre maximum de trades qu'une session peut enchaîner, quoi qu'il
+    # arrive — filet de sécurité si ni l'objectif ni la perte max ne sont
+    # atteints (marché qui stagne, série de trades quasi nuls).
+    max_trades_per_session: int
+    # Intervalle de vérification de l'état du trade en cours, en secondes.
+    session_poll_seconds: float
 
     @property
     def oanda_base_url(self) -> str:
@@ -53,4 +64,7 @@ def get_settings() -> Settings:
         scanner_cache_ttl_seconds=int(os.environ.get("SCANNER_CACHE_TTL_SECONDS", "30")),
         live_trading_confirmed=os.environ.get("LIVE_TRADING_CONFIRMED", "false").lower() == "true",
         max_risk_pct=float(os.environ.get("MAX_RISK_PCT", "0.02")),
+        max_session_loss_pct=float(os.environ.get("MAX_SESSION_LOSS_PCT", "0.10")),
+        max_trades_per_session=int(os.environ.get("MAX_TRADES_PER_SESSION", "20")),
+        session_poll_seconds=float(os.environ.get("SESSION_POLL_SECONDS", "5")),
     )
