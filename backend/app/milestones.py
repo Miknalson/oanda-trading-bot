@@ -17,6 +17,49 @@ from datetime import datetime, timezone
 
 THRESHOLDS = (0.25, 0.50, 0.75, 1.00)
 
+# Libellés des fins de session qui n'ont rien à voir avec un palier atteint.
+# Sans notification dédiée, ces arrêts se produiraient en silence : la
+# session s'arrête, plus aucun ordre n'est passé, et rien ne le signale.
+END_REASONS = {
+    "max_trades_reached": (
+        "⏹️ Session terminée — plafond de trades",
+        "Le nombre maximum de trades a été atteint. Ni l'objectif ni la perte "
+        "max n'ont été touchés.",
+    ),
+    "spread_too_wide": (
+        "⏸️ Session arrêtée — marché trop cher",
+        "Le spread est devenu trop large par rapport au stop-loss. Aucun ordre "
+        "n'a été passé à perte structurelle.",
+    ),
+    "error": (
+        "⚠️ Session interrompue — erreur",
+        "Une erreur est survenue. La session s'est arrêtée plutôt que de "
+        "continuer à trader à l'aveugle.",
+    ),
+    "stopped_by_user": (
+        "⏹️ Session arrêtée",
+        "Arrêt manuel. Aucun nouveau trade ne sera ouvert ; un trade déjà "
+        "ouvert garde son stop-loss et son take-profit.",
+    ),
+}
+
+
+def session_end_notice(reason: str, realized_pl: float, trades: int) -> Milestone:
+    """Notification de fin de session pour un arrêt sans palier atteint."""
+    title, body = END_REASONS.get(
+        reason,
+        ("⏹️ Session terminée", "La session s'est arrêtée."),
+    )
+    resultat = f"{realized_pl:+.2f}"
+    return Milestone(
+        kind="end",
+        threshold=1.0,
+        realized_pl=realized_pl,
+        amount=0.0,
+        title=title,
+        body=f"{body} Résultat : {resultat} sur {trades} trade(s).",
+    )
+
 
 @dataclass
 class Milestone:

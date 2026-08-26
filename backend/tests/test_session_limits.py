@@ -326,6 +326,102 @@ def test_session_stops_when_spread_too_wide():
     print("  spread ruineux -> session arrêtée, AUCUN ordre passé")
 
 
+
+def _notified_kinds(notifier):
+    return [(k, p) for k, p in notifier.sent]
+
+
+def test_max_trades_end_is_notified():
+    """Un arrêt sur plafond de trades ne doit pas être silencieux."""
+    notifier = RecordingNotifier()
+    settings = make_settings(max_trades_per_session=4)
+
+    async def run():
+        client = FakeClient(["win", "loss"] * 20, balance=100_000.0)
+        mgr = SessionManager(client, settings, notifier=notifier)
+        session = await mgr.start(
+            instrument="EUR_USD", risk_pct=0.01,
+            objective_amount=1_000_000.0, max_loss_amount=10_000.0,
+            reward_ratio=1.5,
+        )
+        await mgr._task
+        return session
+
+    session = asyncio.run(run())
+    assert session.stop_reason == "max_trades_reached", session.stop_reason
+    fins = [m for m in session.milestones if m.kind == "end"]
+    assert len(fins) == 1, f"attendu 1 notification de fin, reçu {len(fins)}"
+    assert "plafond" in fins[0].title.lower(), fins[0].title
+    assert ("end", 100) in _notified_kinds(notifier), notifier.sent
+    print(f"  plafond de trades -> notifié : « {fins[0].title} »")
+
+
+def test_spread_too_wide_end_is_notified():
+    notifier = RecordingNotifier()
+
+    async def run():
+        client = WideSpreadClient(["win"] * 5)
+        mgr = SessionManager(client, make_settings(), notifier=notifier)
+        session = await mgr.start(
+            instrument="EUR_USD", risk_pct=0.01,
+            objective_amount=20.0, max_loss_amount=20.0, reward_ratio=1.5,
+        )
+        await mgr._task
+        return session
+
+    session = asyncio.run(run())
+    assert session.stop_reason == "spread_too_wide", session.stop_reason
+    fins = [m for m in session.milestones if m.kind == "end"]
+    assert len(fins) == 1, f"attendu 1 notification de fin, reçu {len(fins)}"
+    print(f"  spread trop large -> notifié : « {fins[0].title} »")
+
+
+def test_objective_end_is_not_double_notified():
+    """Objectif atteint : le palier 100% suffit, pas de doublon de fin."""
+    notifier = RecordingNotifier()
+    session = asyncio.run(
+        run_with_notifier(["win"] * 50, max_loss=20.0, objective=20.0, notifier=notifier)
+    )
+    assert session.stop_reason == "objective_reached", session.stop_reason
+    fins = [m for m in session.milestones if m.kind == "end"]
+    assert fins == [], f"doublon : le palier 100% notifiait déjà la fin ({fins})"
+    assert ("gain", 100) in _notified_kinds(notifier), notifier.sent
+    print("  objectif atteint -> palier 100% seul, aucun doublon de fin")
+
+
+def test_max_loss_end_is_not_double_notified():
+    notifier = RecordingNotifier()
+    session = asyncio.run(
+        run_with_notifier(["loss"] * 50, max_loss=20.0, objective=20.0, notifier=notifier)
+    )
+    fins = [m for m in session.milestones if m.kind == "end"]
+    assert fins == [], f"doublon : le palier 100% de perte notifiait déjà ({fins})"
+    assert ("loss", 100) in _notified_kinds(notifier), notifier.sent
+    print("  perte max atteinte -> palier 100% seul, aucun doublon de fin")
+
+
+def test_manual_stop_is_notified():
+    """Arrêt manuel : confirmation utile si tu as stoppé depuis un autre appareil."""
+    notifier = RecordingNotifier()
+
+    async def run():
+        client = FakeClient(["win"] * 50, balance=100_000.0)
+        mgr = SessionManager(client, make_settings(session_poll_seconds=0.05),
+                             notifier=notifier)
+        session = await mgr.start(
+            instrument="EUR_USD", risk_pct=0.01,
+            objective_amount=1_000_000.0, max_loss_amount=10_000.0, reward_ratio=1.5,
+        )
+        mgr.stop(session.id)
+        return session
+
+    session = asyncio.run(run())
+    fins = [m for m in session.milestones if m.kind == "end"]
+    assert len(fins) == 1, f"attendu 1 notification de fin, reçu {len(fins)}"
+    assert session.stop_reason == "stopped_by_user", session.stop_reason
+    print(f"  arrêt manuel -> notifié : « {fins[0].title} »")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

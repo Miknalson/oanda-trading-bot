@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 
 from .analysis import SpreadTooWideError, TradeAnalyzer
 from .config import Settings
-from .milestones import Milestone, MilestoneTracker
+from .milestones import Milestone, MilestoneTracker, session_end_notice
 from .notifier import Notifier
 from .oanda_client import OandaClient, OandaError
 
@@ -231,6 +231,18 @@ class SessionManager:
             if final is not None:
                 session.milestones.append(final)
                 self._notify(session, final)
+
+        # Toute fin de session doit être signalée. On regarde si un palier
+        # 100% vient d'être émis (objectif atteint ou perte max touchée) :
+        # dans ce cas la notification est déjà partie. Sinon la session
+        # s'arrêterait en silence — plafond de trades, spread devenu trop
+        # cher, erreur — sans que rien ne prévienne que plus aucun ordre
+        # ne sera passé.
+        already_notified = any(m.threshold >= 1.0 for m in session.milestones)
+        if not already_notified:
+            notice = session_end_notice(reason, session.realized_pl, len(session.trades))
+            session.milestones.append(notice)
+            self._notify(session, notice)
 
     async def _run(self, session: TradingSession) -> None:
         try:

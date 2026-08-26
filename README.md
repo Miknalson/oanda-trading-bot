@@ -223,6 +223,13 @@ Pendant une session, tu es notifié à chaque quart de progression — dans les
 | 75% | 📈 75% de l'objectif | ⚠️ 75% de la perte max |
 | 100% | 🎉 Objectif atteint | 🛑 Perte max atteinte |
 
+**Toute fin de session est signalée**, y compris celles qui n'atteignent
+aucun palier : plafond de trades, spread devenu trop cher, erreur, arrêt
+manuel. Sans ça, la session s'arrêterait en silence — plus aucun ordre passé,
+et rien pour le dire. Le code vérifie si un palier 100 % vient d'être émis :
+si oui la fin est déjà annoncée, sinon une notification dédiée part. Pas de
+doublon, jamais de silence.
+
 Chaque palier n'est envoyé **qu'une fois**. Le P/L d'une session oscille
 (un trade gagnant, un perdant, un gagnant...) : sans mémoire, tu recevrais la
 même notification « 50% » à chaque aller-retour autour du seuil. Un « plus
