@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from .analysis import TradeAnalyzer
+from .analysis import SpreadTooWideError, TradeAnalyzer
 from .config import get_settings
 from .oanda_client import OandaClient, OandaError
 from .scanner import VolatilityScanner
@@ -110,7 +110,12 @@ async def suggest_trade(
             objective_amount=objective_amount,
             granularity=granularity,
             max_risk_pct=settings.max_risk_pct,
+            max_spread_ratio=settings.max_spread_ratio,
         )
+    except SpreadTooWideError as exc:
+        # 409 : rien d'invalide dans la requête, c'est l'état du marché qui
+        # rend ce trade non rentable en l'état.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except OandaError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except ValueError as exc:
@@ -267,6 +272,7 @@ async def limits() -> dict:
         "max_risk_pct": settings.max_risk_pct,
         "max_session_loss_pct": settings.max_session_loss_pct,
         "max_trades_per_session": settings.max_trades_per_session,
+        "max_spread_ratio": settings.max_spread_ratio,
         "orders_allowed": settings.orders_allowed,
         "environment": settings.oanda_environment,
     }

@@ -27,7 +27,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .analysis import TradeAnalyzer
+from .analysis import SpreadTooWideError, TradeAnalyzer
 from .config import Settings
 from .milestones import Milestone, MilestoneTracker
 from .notifier import Notifier
@@ -233,6 +233,7 @@ class SessionManager:
                     granularity=session.granularity,
                     max_risk_pct=self.settings.max_risk_pct,
                     reward_ratio=session.reward_ratio,
+                    max_spread_ratio=self.settings.max_spread_ratio,
                 )
 
                 # Dernière vérification avant d'engager de l'argent : est-ce
@@ -294,6 +295,10 @@ class SessionManager:
                     self._finish(session, "max_loss_reached")
                     return
 
+        except SpreadTooWideError as exc:
+            # Ce n'est pas une panne : le marché coûte trop cher en l'état.
+            # On s'arrête proprement plutôt que de trader à perte structurelle.
+            self._finish(session, "spread_too_wide", str(exc))
         except asyncio.CancelledError:
             # Arrêt manuel : _finish a déjà été appelé par stop().
             raise

@@ -30,6 +30,7 @@ def make_settings(**overrides) -> Settings:
         max_session_loss_pct=0.10,
         max_trades_per_session=20,
         session_poll_seconds=0.0,  # pas d'attente réelle dans les tests
+        max_spread_ratio=0.15,
         vapid_private_key="",
         vapid_public_key="",
         vapid_claim_email="",
@@ -49,6 +50,18 @@ class FakeClient:
 
     async def get_account_summary(self) -> dict:
         return {"balance": str(self.balance)}
+
+    async def get_pricing(self, instruments) -> dict:
+        # Spread volontairement minuscule : ces tests portent sur les limites
+        # de session, pas sur le coût du spread (couvert par test_spread.py).
+        mid = 1.0 + 0.001 * 60
+        spread = 0.000001
+        return {
+            instruments[0]: {
+                "bid": mid - spread / 2, "ask": mid + spread / 2,
+                "spread": spread, "tradeable": True,
+            }
+        }
 
     async def get_candles(self, instrument, granularity="M15", count=100) -> list[dict]:
         # Tendance haussière franche + amplitude constante => ATR > 0.
@@ -275,6 +288,42 @@ def test_push_failure_does_not_break_the_session():
         f"  push en échec -> session terminée normalement "
         f"({session.stop_reason}), {len(session.milestones)} paliers conservés"
     )
+
+
+
+class WideSpreadClient(FakeClient):
+    """Comme FakeClient, mais avec un spread ruineux."""
+
+    async def get_pricing(self, instruments):
+        mid = 1.0 + 0.001 * 60
+        spread = 0.05  # énorme face au stop calculé
+        return {
+            instruments[0]: {
+                "bid": mid - spread / 2, "ask": mid + spread / 2,
+                "spread": spread, "tradeable": True,
+            }
+        }
+
+
+def test_session_stops_when_spread_too_wide():
+    """Un spread ruineux arrête la session sans passer le moindre ordre."""
+    async def run():
+        client = WideSpreadClient(["win"] * 10)
+        mgr = SessionManager(client, make_settings())
+        session = await mgr.start(
+            instrument="EUR_USD", risk_pct=0.01,
+            objective_amount=20.0, max_loss_amount=20.0, reward_ratio=1.5,
+        )
+        await mgr._task
+        return session, client
+
+    session, client = asyncio.run(run())
+    assert session.stop_reason == "spread_too_wide", session.stop_reason
+    assert len(client.orders) == 0, (
+        f"{len(client.orders)} ordre(s) passé(s) alors que le spread était ruineux"
+    )
+    assert "Spread trop large" in (session.error or ""), session.error
+    print("  spread ruineux -> session arrêtée, AUCUN ordre passé")
 
 
 if __name__ == "__main__":

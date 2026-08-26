@@ -38,6 +38,11 @@ class Settings:
     max_trades_per_session: int
     # Intervalle de vérification de l'état du trade en cours, en secondes.
     session_poll_seconds: float
+    # Le spread est le coût réel de chaque trade. Rapporté à la distance du
+    # stop-loss, il dit quelle part du risque part en frais : au-delà de ce
+    # seuil le trade est refusé, parce que les frais rongent l'espérance de
+    # gain au point de la rendre négative. Voir la section Frais du README.
+    max_spread_ratio: float
     # Clés VAPID pour les notifications Web Push (paliers 25/50/75/100%).
     # Vides = push désactivé ; les paliers restent lisibles via l'API.
     vapid_private_key: str
@@ -72,6 +77,7 @@ def get_settings() -> Settings:
         max_session_loss_pct=float(os.environ.get("MAX_SESSION_LOSS_PCT", "0.10")),
         max_trades_per_session=int(os.environ.get("MAX_TRADES_PER_SESSION", "20")),
         session_poll_seconds=float(os.environ.get("SESSION_POLL_SECONDS", "5")),
+        max_spread_ratio=float(os.environ.get("MAX_SPREAD_RATIO", "0.15")),
         vapid_private_key=os.environ.get("VAPID_PRIVATE_KEY", ""),
         vapid_public_key=os.environ.get("VAPID_PUBLIC_KEY", ""),
         vapid_claim_email=os.environ.get("VAPID_CLAIM_EMAIL", ""),

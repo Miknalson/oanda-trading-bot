@@ -65,6 +65,57 @@ boucle s'arrête, le trade en cours reste protégé.
 
 Les garde-fous actifs sont lisibles sur `GET /api/limits`.
 
+## Frais : le spread, et pourquoi l'intervalle compte plus que tout
+
+Sur OANDA (comptes standard) il n'y a pas de commission : le coût est le
+**spread**, l'écart entre le prix d'achat et de vente, payé à chaque ouverture
+de position. Une session enchaînant les trades, ce coût se répète.
+
+Ce qui décide de son poids, c'est le rapport `spread / distance du stop-loss`.
+Le spread est à peu près fixe, alors que le stop suit la volatilité
+(1,5 × ATR) : plus l'intervalle est court, plus le stop est serré, et plus le
+spread dévore une part énorme du risque.
+
+Avec un solde de 250 €, 1 % de risque (2,50 €/trade), ratio 1,5, 55 % de réussite :
+
+| Instrument | Stop | Coût/trade | % du risque | Gain net/trade |
+|---|---|---|---|---|
+| EUR/USD **M1** | 2,2 pips | 1,33 € | **53 %** | **−0,40 € ❌** |
+| EUR/USD **M5** | 4,5 pips | 0,67 € | 27 % | +0,27 € |
+| EUR/USD **M15** | 7,5 pips | 0,40 € | 16 % | +0,54 € |
+| EUR/USD **H1** | 18 pips | 0,17 € | 7 % | +0,77 € |
+| EUR/USD **H4** | 37,5 pips | 0,08 € | 3 % | +0,86 € |
+
+**Sur M1 la stratégie perd de l'argent par construction** : même avec 55 % de
+trades gagnants, l'espérance est négative. Ce n'est pas de la malchance, c'est
+de l'arithmétique.
+
+### Ce que fait le code
+
+- **Prix réels d'exécution** : l'entrée est le `ask` à l'achat et le `bid` à la
+  vente, lus sur l'endpoint pricing d'OANDA. Les bougies renvoient des prix
+  *médians* : s'en servir masquerait le spread et rendrait toutes les
+  suggestions trop optimistes.
+- **Coût affiché** : chaque suggestion indique `spread`, `spread_cost` et
+  `spread_pct_of_risk`, plus `move_to_win` / `move_to_lose` — le mouvement que
+  le marché doit réellement parcourir. Perdre demande toujours *moins* de
+  mouvement que gagner : c'est exactement ça, le coût du spread.
+- **Refus automatique** : au-delà de `MAX_SPREAD_RATIO` (15 % par défaut), le
+  trade est refusé (HTTP 409) et une session en cours s'arrête avec la raison
+  `spread_too_wide`, sans passer d'ordre.
+
+Le montant risqué reste exact : stop et objectif sont placés depuis le prix
+d'exécution réel, donc une perte au stop vaut bien `risk_pct` du solde.
+
+### Recommandations
+
+- **H1 minimum.** Jamais M1, et M5 seulement en connaissance de cause.
+- **Objectif modeste** : viser 20 € par session avec 2,50 € de risque par trade
+  demanderait ~26 trades même sur H1 — au-dessus du plafond de 20. Un objectif
+  de 5 € est autrement plus atteignable.
+- Le scanner classe par volatilité, ce qui n'est pas un classement par coût :
+  vérifie toujours le `spread_pct_of_risk` de la suggestion avant de lancer.
+
 ## Notifications : paliers 25 / 50 / 75 / 100 %
 
 Pendant une session, tu es notifié à chaque quart de progression — dans les
@@ -116,6 +167,7 @@ et le trading continue.
 cd backend
 .venv/bin/python tests/test_session_limits.py
 .venv/bin/python tests/test_milestones.py
+.venv/bin/python tests/test_spread.py
 ```
 
 Les tests utilisent un faux client OANDA (aucun réseau, aucun argent) et

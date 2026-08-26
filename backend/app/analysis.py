@@ -20,6 +20,16 @@ from .risk import compute_position_size
 ATR_STOP_MULTIPLIER = 1.5
 
 
+class SpreadTooWideError(RuntimeError):
+    """Le spread mange une part excessive du risque : trade refusé.
+
+    Le spread est fixe alors que la distance du stop-loss suit la volatilité :
+    sur un intervalle court le stop est serré, donc le spread représente une
+    fraction énorme du risque et l'espérance de gain devient négative. Mieux
+    vaut ne pas trader que trader à perte structurelle.
+    """
+
+
 @dataclass
 class TradeSuggestion:
     instrument: str
@@ -33,6 +43,14 @@ class TradeSuggestion:
     potential_gain: float
     reward_risk_ratio: float
     rationale: str
+    # Coût réel du trade : le spread payé à l'ouverture.
+    spread: float = 0.0
+    spread_cost: float = 0.0
+    spread_pct_of_risk: float = 0.0
+    # Ce que le marché doit réellement parcourir, spread inclus. Perdre
+    # demande moins de mouvement que gagner — c'est ça, le coût.
+    move_to_win: float = 0.0
+    move_to_lose: float = 0.0
 
 
 class TradeAnalyzer:
@@ -48,6 +66,7 @@ class TradeAnalyzer:
         count: int = 100,
         max_risk_pct: float = 0.02,
         reward_ratio: float | None = None,
+        max_spread_ratio: float = 0.15,
     ) -> TradeSuggestion:
         """Construit une proposition de trade.
 
@@ -83,8 +102,28 @@ class TradeAnalyzer:
                 "avec les données disponibles."
             )
 
-        entry_price = closes[-1]
         stop_distance = atr_value * ATR_STOP_MULTIPLIER
+
+        # Prix réels d'exécution : on achète au `ask`, on vend au `bid`.
+        # Utiliser le prix médian des bougies masquerait le spread.
+        pricing = await self.client.get_pricing([instrument])
+        quote = pricing.get(instrument)
+        if quote is None:
+            raise OandaError(f"Aucun prix disponible pour {instrument}.")
+        if not quote.get("tradeable", True):
+            raise OandaError(f"{instrument} n'est pas négociable actuellement (marché fermé ?).")
+
+        spread = quote["spread"]
+        spread_ratio = spread / stop_distance if stop_distance > 0 else float("inf")
+        if spread_ratio > max_spread_ratio:
+            raise SpreadTooWideError(
+                f"Spread trop large sur {instrument} : {spread:.5f} pour un stop de "
+                f"{stop_distance:.5f}, soit {spread_ratio:.0%} du risque "
+                f"(plafond {max_spread_ratio:.0%}). Passe à un intervalle plus long "
+                f"(H1/H4) ou choisis un instrument moins cher."
+            )
+
+        entry_price = quote["ask"] if direction == "buy" else quote["bid"]
 
         account = await self.client.get_account_summary()
         balance = float(account.get("balance", 0))
@@ -107,6 +146,8 @@ class TradeAnalyzer:
         reward_risk_ratio = take_profit_distance / stop_distance
         expected_gain = take_profit_distance * sizing.units
 
+        # Stop et objectif placés depuis le prix d'exécution réel : la perte
+        # en euros si le stop est touché vaut donc exactement `risk_amount`.
         if direction == "buy":
             stop_loss_price = entry_price - stop_distance
             take_profit_price = entry_price + take_profit_distance
@@ -116,16 +157,32 @@ class TradeAnalyzer:
             take_profit_price = entry_price - take_profit_distance
             units = -sizing.units
 
+        # Le spread se paie en mouvement de marché : pour sortir en gain il
+        # faut parcourir la distance de l'objectif PLUS le spread, alors
+        # qu'une perte survient après le spread EN MOINS.
+        spread_cost = spread * sizing.units
+        move_to_win = take_profit_distance + spread
+        move_to_lose = max(stop_distance - spread, 0.0)
+
         rationale = (
             f"Tendance {'haussière' if direction == 'buy' else 'baissière'} "
             f"(moyenne mobile rapide {'au-dessus' if direction == 'buy' else 'en-dessous'} "
             f"de la lente). Stop-loss à {ATR_STOP_MULTIPLIER}x l'ATR ({atr_value:.5f}). "
             f"Ratio gain/risque de ce trade : {reward_risk_ratio:.2f}."
         )
+        rationale += (
+            f" Spread {spread:.5f} = {spread_ratio:.0%} du risque "
+            f"({spread_cost:.2f} de frais sur ce trade)."
+        )
         if reward_risk_ratio < 1:
             rationale += (
                 " ⚠️ Ce ratio est défavorable (tu risques plus que ce que tu vises) — "
                 "objectif de gain probablement trop bas par rapport au risque pris."
+            )
+        if spread_ratio > 0.08:
+            rationale += (
+                " ⚠️ Les frais pèsent lourd ici : un intervalle plus long "
+                "(H1/H4) réduirait fortement leur poids."
             )
 
         return TradeSuggestion(
@@ -140,4 +197,9 @@ class TradeAnalyzer:
             potential_gain=round(expected_gain, 2),
             reward_risk_ratio=round(reward_risk_ratio, 2),
             rationale=rationale,
+            spread=round(spread, 5),
+            spread_cost=round(spread_cost, 2),
+            spread_pct_of_risk=round(spread_ratio, 4),
+            move_to_win=round(move_to_win, 5),
+            move_to_lose=round(move_to_lose, 5),
         )

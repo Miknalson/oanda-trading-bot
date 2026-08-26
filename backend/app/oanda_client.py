@@ -132,3 +132,36 @@ class OandaClient:
         if resp.status_code != 200:
             raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
         return resp.json().get("trade", {})
+
+    async def get_pricing(self, instruments: list[str]) -> dict[str, dict]:
+        """Prix acheteur/vendeur actuels, et donc le spread réellement payé.
+
+        Les bougies renvoient des prix *médians* : s'en servir pour calculer
+        une entrée revient à ignorer le spread, et donc à sous-estimer le
+        coût de chaque trade. Pour dimensionner correctement une position il
+        faut le vrai prix auquel l'ordre sera exécuté — `ask` à l'achat,
+        `bid` à la vente.
+        """
+        url = (
+            f"{self.settings.oanda_base_url}/v3/accounts/"
+            f"{self.settings.oanda_account_id}/pricing"
+        )
+        params = {"instruments": ",".join(instruments)}
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers=self._headers(), params=params)
+        if resp.status_code != 200:
+            raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
+
+        prices: dict[str, dict] = {}
+        for entry in resp.json().get("prices", []):
+            bids, asks = entry.get("bids") or [], entry.get("asks") or []
+            if not bids or not asks:
+                continue
+            bid, ask = float(bids[0]["price"]), float(asks[0]["price"])
+            prices[entry["instrument"]] = {
+                "bid": bid,
+                "ask": ask,
+                "spread": ask - bid,
+                "tradeable": entry.get("tradeable", True),
+            }
+        return prices
