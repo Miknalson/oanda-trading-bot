@@ -30,6 +30,9 @@ def make_settings(**overrides) -> Settings:
         max_session_loss_pct=0.10,
         max_trades_per_session=20,
         session_poll_seconds=0.0,  # pas d'attente réelle dans les tests
+        vapid_private_key="",
+        vapid_public_key="",
+        vapid_claim_email="",
     )
     return replace(base, **overrides)
 
@@ -196,6 +199,82 @@ def test_only_one_session_at_a_time():
         print(f"  session unique: refusé comme attendu -> {exc}")
         return
     raise AssertionError("une deuxième session simultanée aurait dû être refusée")
+
+
+
+
+class RecordingNotifier:
+    """Faux notifier : enregistre les envois au lieu de faire du réseau."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.sent: list[tuple[str, int]] = []
+        self.fail = fail
+        self.push_enabled = True
+        self.vapid_public_key = "fake"
+        self.subscriptions: list[dict] = []
+
+    def send_milestone(self, milestone, session_id):
+        if self.fail:
+            raise RuntimeError("push cassé exprès")
+        self.sent.append((milestone.kind, int(milestone.threshold * 100)))
+        return 1
+
+
+async def run_with_notifier(outcomes, *, max_loss, objective, notifier, balance=BALANCE):
+    client = FakeClient(outcomes, balance=balance)
+    mgr = SessionManager(client, make_settings(), notifier=notifier)
+    session = await mgr.start(
+        instrument="EUR_USD", risk_pct=0.01,
+        objective_amount=objective, max_loss_amount=max_loss, reward_ratio=1.5,
+    )
+    await mgr._task
+    return session
+
+
+def test_milestones_fire_during_a_winning_session():
+    notifier = RecordingNotifier()
+    session = asyncio.run(
+        run_with_notifier(["win"] * 50, max_loss=20.0, objective=20.0, notifier=notifier)
+    )
+    kinds = {k for k, _ in notifier.sent}
+    percents = [p for _, p in notifier.sent]
+    assert kinds == {"gain"}, kinds
+    assert 100 in percents, percents
+    assert percents == sorted(percents), f"paliers dans le désordre: {percents}"
+    assert len(percents) == len(set(percents)), f"doublons: {percents}"
+    assert [m.to_dict()["percent"] for m in session.milestones] == percents
+    print(f"  session gagnante -> paliers notifiés: {percents}")
+
+
+def test_milestones_fire_during_a_losing_session():
+    notifier = RecordingNotifier()
+    asyncio.run(
+        run_with_notifier(["loss"] * 50, max_loss=20.0, objective=20.0, notifier=notifier)
+    )
+    kinds = {k for k, _ in notifier.sent}
+    percents = [p for _, p in notifier.sent]
+    assert kinds == {"loss"}, kinds
+    assert percents == sorted(percents), percents
+    assert len(percents) == len(set(percents)), f"doublons: {percents}"
+    # Le palier 100% doit arriver même si le garde-fou arrête la session
+    # juste sous la limite (sinon aucune notification à l'arrêt).
+    assert 100 in percents, f"palier 100% manquant à l'arrêt: {percents}"
+    print(f"  session perdante -> paliers notifiés: {percents}")
+
+
+def test_push_failure_does_not_break_the_session():
+    """Si l'envoi de notification plante, le trading continue normalement."""
+    notifier = RecordingNotifier(fail=True)
+    session = asyncio.run(
+        run_with_notifier(["win"] * 50, max_loss=20.0, objective=20.0, notifier=notifier)
+    )
+    assert session.stop_reason == "objective_reached", session.stop_reason
+    assert session.error is None, session.error
+    assert len(session.milestones) > 0, "les paliers doivent rester enregistrés"
+    print(
+        f"  push en échec -> session terminée normalement "
+        f"({session.stop_reason}), {len(session.milestones)} paliers conservés"
+    )
 
 
 if __name__ == "__main__":

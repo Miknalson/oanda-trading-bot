@@ -270,3 +270,76 @@ async def limits() -> dict:
         "orders_allowed": settings.orders_allowed,
         "environment": settings.oanda_environment,
     }
+
+
+class PushSubscriptionRequest(BaseModel):
+    """Abonnement Web Push tel que produit par le navigateur.
+
+    Format renvoyé par `PushManager.subscribe()` côté PWA :
+    `{endpoint, keys: {p256dh, auth}}`.
+    """
+
+    endpoint: str
+    keys: dict
+
+
+@app.get("/api/notifications/config")
+async def notifications_config() -> dict:
+    """Clé publique VAPID à utiliser par la PWA pour s'abonner."""
+    notifier = get_session_manager().notifier
+    return {
+        "push_enabled": notifier.push_enabled,
+        "vapid_public_key": notifier.vapid_public_key or None,
+        "subscribers": len(notifier.subscriptions),
+        "thresholds_percent": [25, 50, 75, 100],
+    }
+
+
+@app.post("/api/notifications/subscribe")
+async def subscribe_push(req: PushSubscriptionRequest) -> dict:
+    notifier = get_session_manager().notifier
+    if not notifier.push_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Web Push non configuré. Génère une paire de clés avec "
+                "`python -c \"from app.notifier import generate_vapid_keys; "
+                "generate_vapid_keys()\"` puis renseigne VAPID_PRIVATE_KEY, "
+                "VAPID_PUBLIC_KEY et VAPID_CLAIM_EMAIL dans backend/.env."
+            ),
+        )
+    try:
+        created = notifier.subscribe(req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"subscribed": True, "new": created, "subscribers": len(notifier.subscriptions)}
+
+
+@app.post("/api/notifications/unsubscribe")
+async def unsubscribe_push(req: PushSubscriptionRequest) -> dict:
+    notifier = get_session_manager().notifier
+    removed = notifier.unsubscribe(req.endpoint)
+    return {"removed": removed, "subscribers": len(notifier.subscriptions)}
+
+
+@app.get("/api/sessions/{session_id}/milestones")
+async def session_milestones(session_id: str) -> dict:
+    """Paliers franchis par la session — pour affichage dans l'app."""
+    session = get_session_manager().sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session inconnue : {session_id}")
+    return {
+        "session_id": session_id,
+        "realized_pl": round(session.realized_pl, 2),
+        "progress_gain_pct": round(
+            max(0.0, session.realized_pl) / session.objective_amount * 100, 1
+        )
+        if session.objective_amount > 0
+        else 0.0,
+        "progress_loss_pct": round(
+            max(0.0, -session.realized_pl) / session.max_loss_amount * 100, 1
+        )
+        if session.max_loss_amount > 0
+        else 0.0,
+        "milestones": [m.to_dict() for m in session.milestones],
+    }

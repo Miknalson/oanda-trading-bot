@@ -38,6 +38,11 @@ class Settings:
     max_trades_per_session: int
     # Intervalle de vérification de l'état du trade en cours, en secondes.
     session_poll_seconds: float
+    # Clés VAPID pour les notifications Web Push (paliers 25/50/75/100%).
+    # Vides = push désactivé ; les paliers restent lisibles via l'API.
+    vapid_private_key: str
+    vapid_public_key: str
+    vapid_claim_email: str
 
     @property
     def oanda_base_url(self) -> str:
@@ -67,4 +72,7 @@ def get_settings() -> Settings:
         max_session_loss_pct=float(os.environ.get("MAX_SESSION_LOSS_PCT", "0.10")),
         max_trades_per_session=int(os.environ.get("MAX_TRADES_PER_SESSION", "20")),
         session_poll_seconds=float(os.environ.get("SESSION_POLL_SECONDS", "5")),
+        vapid_private_key=os.environ.get("VAPID_PRIVATE_KEY", ""),
+        vapid_public_key=os.environ.get("VAPID_PUBLIC_KEY", ""),
+        vapid_claim_email=os.environ.get("VAPID_CLAIM_EMAIL", ""),
     )

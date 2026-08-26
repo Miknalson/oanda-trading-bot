@@ -65,10 +65,57 @@ boucle s'arrête, le trade en cours reste protégé.
 
 Les garde-fous actifs sont lisibles sur `GET /api/limits`.
 
+## Notifications : paliers 25 / 50 / 75 / 100 %
+
+Pendant une session, tu es notifié à chaque quart de progression — dans les
+**deux directions** :
+
+| Palier | Vers l'objectif | Vers la perte max |
+|---|---|---|
+| 25% | 📈 25% de l'objectif | ⚠️ 25% de la perte max |
+| 50% | 📈 50% de l'objectif | ⚠️ 50% de la perte max |
+| 75% | 📈 75% de l'objectif | ⚠️ 75% de la perte max |
+| 100% | 🎉 Objectif atteint | 🛑 Perte max atteinte |
+
+Chaque palier n'est envoyé **qu'une fois**. Le P/L d'une session oscille
+(un trade gagnant, un perdant, un gagnant...) : sans mémoire, tu recevrais la
+même notification « 50% » à chaque aller-retour autour du seuil. Un « plus
+haut atteint » est donc conservé par direction.
+
+Le palier 100% de perte est émis même quand le garde-fou arrête la session
+*avant* d'ouvrir le trade de trop — le P/L plafonne alors juste sous la
+limite (ex. -19,97 sur -20,00) et le seuil ne serait jamais franchi
+naturellement. Sans ce traitement, aucune notification n'arriverait au moment
+précis où elle est la plus utile.
+
+### Activer le push sur le téléphone
+
+Sans configuration, les paliers sont enregistrés et lisibles via
+`GET /api/sessions/{id}/milestones` — suffisant quand l'app est ouverte. Pour
+les recevoir **écran verrouillé**, il faut des clés VAPID :
+
+```bash
+cd backend
+.venv/bin/python -c "from app.notifier import generate_vapid_keys; generate_vapid_keys()"
+# colle les 3 lignes affichées dans backend/.env, puis relance uvicorn
+```
+
+Côté PWA, appelle `enablePushNotifications()` (dans `frontend/push.js`) depuis
+un **clic utilisateur** — les navigateurs refusent une demande de permission
+déclenchée automatiquement au chargement.
+
+Sur iPhone, les notifications push ne fonctionnent que si la PWA a été ajoutée
+à l'écran d'accueil (Partager → Sur l'écran d'accueil) et servie en HTTPS.
+
+Un échec d'envoi n'interrompt jamais une session : le palier reste enregistré
+et le trading continue.
+
 ### Tests
 
 ```bash
-cd backend && .venv/bin/python tests/test_session_limits.py
+cd backend
+.venv/bin/python tests/test_session_limits.py
+.venv/bin/python tests/test_milestones.py
 ```
 
 Les tests utilisent un faux client OANDA (aucun réseau, aucun argent) et

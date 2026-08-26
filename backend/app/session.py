@@ -22,12 +22,15 @@ il reste protégé et se fermera tout seul.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .analysis import TradeAnalyzer
 from .config import Settings
+from .milestones import Milestone, MilestoneTracker
+from .notifier import Notifier
 from .oanda_client import OandaClient, OandaError
 
 # Combien de temps on attend au maximum qu'un trade se ferme avant de
@@ -62,6 +65,8 @@ class TradingSession:
     stop_reason: str | None = None
     realized_pl: float = 0.0
     trades: list[SessionTrade] = field(default_factory=list)
+    milestones: list[Milestone] = field(default_factory=list)
+    tracker: MilestoneTracker | None = None
     error: str | None = None
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     ended_at: str | None = None
@@ -83,6 +88,17 @@ class TradingSession:
             "reward_ratio": self.reward_ratio,
             "trades_count": len(self.trades),
             "trades": [t.__dict__ for t in self.trades],
+            "milestones": [m.to_dict() for m in self.milestones],
+            "progress_gain_pct": round(
+                max(0.0, self.realized_pl) / self.objective_amount * 100, 1
+            )
+            if self.objective_amount > 0
+            else 0.0,
+            "progress_loss_pct": round(
+                max(0.0, -self.realized_pl) / self.max_loss_amount * 100, 1
+            )
+            if self.max_loss_amount > 0
+            else 0.0,
             "error": self.error,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
@@ -96,10 +112,17 @@ class SessionError(RuntimeError):
 class SessionManager:
     """Détient au plus UNE session active, et sa boucle asyncio."""
 
-    def __init__(self, client: OandaClient, settings: Settings) -> None:
+    def __init__(
+        self, client: OandaClient, settings: Settings, notifier: Notifier | None = None
+    ) -> None:
         self.client = client
         self.settings = settings
         self.analyzer = TradeAnalyzer(client)
+        self.notifier = notifier or Notifier(
+            vapid_private_key=settings.vapid_private_key,
+            vapid_public_key=settings.vapid_public_key,
+            vapid_claim_email=settings.vapid_claim_email,
+        )
         self.sessions: dict[str, TradingSession] = {}
         self._task: asyncio.Task | None = None
         self._active_id: str | None = None
@@ -158,6 +181,9 @@ class SessionManager:
             reward_ratio=reward_ratio,
             granularity=granularity,
         )
+        session.tracker = MilestoneTracker(
+            objective_amount=objective_amount, max_loss_amount=max_loss_amount
+        )
         self.sessions[session.id] = session
         self._active_id = session.id
         self._task = asyncio.create_task(self._run(session))
@@ -174,6 +200,12 @@ class SessionManager:
             self._task.cancel()
         return session
 
+    # Raisons d'arrêt qui signifient « la limite de perte a fait son travail ».
+    # `max_loss_would_be_exceeded` arrête la session avant d'ouvrir le trade
+    # de trop : le P/L plafonne juste sous la limite, donc le palier 100%
+    # doit être émis explicitement.
+    _LOSS_STOP_REASONS = ("max_loss_reached", "max_loss_would_be_exceeded")
+
     def _finish(self, session: TradingSession, reason: str, error: str | None = None) -> None:
         session.status = "stopped" if reason == "stopped_by_user" else reason
         session.stop_reason = reason
@@ -181,6 +213,12 @@ class SessionManager:
         session.ended_at = datetime.now(timezone.utc).isoformat()
         if self._active_id == session.id:
             self._active_id = None
+
+        if session.tracker is not None and reason in self._LOSS_STOP_REASONS:
+            final = session.tracker.force_final("loss", session.realized_pl)
+            if final is not None:
+                session.milestones.append(final)
+                self._notify(session, final)
 
     async def _run(self, session: TradingSession) -> None:
         try:
@@ -247,6 +285,7 @@ class SessionManager:
                 trade.realized_pl = realized
                 trade.closed = True
                 session.realized_pl += realized
+                self._emit_milestones(session)
 
                 if session.realized_pl >= session.objective_amount:
                     self._finish(session, "objective_reached")
@@ -262,6 +301,29 @@ class SessionManager:
             self._finish(session, "error", str(exc))
         except Exception as exc:  # noqa: BLE001 - on arrête plutôt que de trader à l'aveugle
             self._finish(session, "error", f"{type(exc).__name__}: {exc}")
+
+    def _emit_milestones(self, session: TradingSession) -> None:
+        """Détecte les paliers franchis et déclenche les notifications.
+
+        Un échec d'envoi ne doit jamais interrompre la session : le palier
+        reste enregistré et consultable via l'API même si le push échoue.
+        """
+        if session.tracker is None:
+            return
+        for milestone in session.tracker.check(session.realized_pl):
+            session.milestones.append(milestone)
+            self._notify(session, milestone)
+
+    def _notify(self, session: TradingSession, milestone: Milestone) -> None:
+        try:
+            self.notifier.send_milestone(milestone, session.id)
+        except Exception as exc:  # noqa: BLE001 - notifier ne casse pas le trading
+            logging.getLogger(__name__).warning(
+                "Notification du palier %s %d%% échouée : %s",
+                milestone.kind,
+                int(milestone.threshold * 100),
+                exc,
+            )
 
     async def _wait_for_close(self, trade: SessionTrade) -> float | None:
         """Attend la fermeture du trade chez OANDA, renvoie son P/L réalisé."""
