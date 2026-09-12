@@ -6,4 +6,4 @@ pywebpush==2.0.0
 
 # Pour tester le carnet dans un vrai noyau (dev uniquement)
 ipython==9.17.1
-pytest==9.0.1
+pytest==9.1.1
