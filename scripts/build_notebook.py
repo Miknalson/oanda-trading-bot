@@ -256,7 +256,8 @@ if indecis:
     for l, r in indecis:
         besoin = r.trades_needed()
         combien = f"il en faudrait ~{besoin}" if besoin else "bien davantage"
-        print(f"  {r.granularity} à {l} : {len(r.closed)} trades, {combien}.")
+        pluriel = "s" if len(r.closed) > 1 else ""
+        print(f"  {r.granularity} à {l} : {len(r.closed)} trade{pluriel}, {combien}.")
     print("Ne conclus rien de ces lignes, ni en bien ni en mal. Pour trancher il")
     print("faut plus d'historique (pagination par date, voir fetch_history) ou")
     print("plusieurs instruments.")
@@ -265,8 +266,11 @@ if not concluants and not indecis:
     print("Aucun trade nulle part — regarde les motifs ci-dessus avant de")
     print("changer quoi que ce soit à la stratégie.")
 
-# La leçon du balayage, à ne pas rater.
-taux = [r.win_rate for _, r in resultats if r.closed]
+# La leçon du balayage, à ne pas rater. On ne compare que des échantillons
+# comparables : un taux mesuré sur 2 trades n'est pas un taux, et le mettre
+# en face d'un autre mesuré sur 120 fabriquerait un écart qui n'existe pas.
+COMPARABLE = 30
+taux = [r.win_rate for _, r in resultats if len(r.closed) >= COMPARABLE]
 if len(taux) > 1 and max(taux) - min(taux) > 0.02:
     print()
     print(f"Le spread seul déplace le taux de réussite de {min(taux):.1%} à "
