@@ -181,8 +181,135 @@ def test_la_cellule_1_recupere_vraiment_les_corrections():
             sys.path[:] = sauvegarde
             for nom in set(sys.modules) - modules_avant:
                 sys.modules.pop(nom, None)
+            # Et surtout : purger TOUT `app` déjà chargé. Ce test a réimporté
+            # le paquet depuis un dossier temporaire qui va disparaître ; le
+            # laisser en place ferait échouer le premier `from app...` d'un
+            # test suivant avec un ModuleNotFoundError incompréhensible.
+            for nom in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+                sys.modules.pop(nom, None)
 
     print("  correction poussée entre deux passages : bien chargée")
+
+
+def test_le_spread_marche_ferme_n_est_jamais_utilise():
+    """Un spread relevé marché fermé ne doit pas paramétrer le backtest.
+
+    Le marché des changes ferme du vendredi soir au dimanche soir. Le spread
+    affiché alors est élargi et figé : 5,2 pips sur EUR/USD au lieu de 1. En
+    l'appliquant à 1200 bougies de cotations en semaine, un essai réel a fait
+    refuser 100 % des entrées sur H1 — résultat qui ressemblait à « aucun
+    signal » et ne venait que du week-end.
+    """
+    import ast
+
+    cellule = code_seul(cellules_de_code()[-2])
+    assert "cours.tradeable" in cellule, (
+        "la cellule de backtest ne vérifie pas si le marché est ouvert"
+    )
+
+    # Vérification sur l'arbre syntaxique et non ligne par ligne : une simple
+    # recherche de texte ne voit pas si l'affectation est sous un `if`.
+    arbre = ast.parse(cellule)
+    sous_garde: set[int] = set()
+    for noeud in ast.walk(arbre):
+        if isinstance(noeud, ast.If) and "cours.tradeable" in ast.unparse(noeud.test):
+            for enfant in noeud.body:
+                for descendant in ast.walk(enfant):
+                    sous_garde.add(id(descendant))
+
+    # Seules les affectations qui ALIMENTENT le backtest comptent : calculer
+    # `pips` pour l'afficher ne fausse rien, l'injecter dans SPREADS si.
+    affectations = [
+        n for n in ast.walk(arbre)
+        if isinstance(n, ast.Assign)
+        and "cours.spread" in ast.unparse(n.value)
+        and any("SPREADS" in ast.unparse(cible) for cible in n.targets)
+    ]
+    assert affectations, "le spread live n'alimente plus le backtest du tout"
+    for affectation in affectations:
+        assert id(affectation) in sous_garde, (
+            f"spread live utilisé hors du test d'ouverture : "
+            f"{ast.unparse(affectation)}"
+        )
+    print("  le spread live n'est retenu que sous `if cours.tradeable`")
+
+
+def _courtier_factice(marche_ouvert: bool):
+    """Courtier minimal : assez pour exécuter les cellules pour de vrai."""
+    import random
+
+    sys.path.insert(0, str(RACINE / "backend"))
+    from app.broker import Candle, Quote
+
+    class Factice:
+        async def get_quote(self, instrument):
+            # Marché fermé : spread élargi, comme chez un vrai courtier.
+            spread = 0.00052 if not marche_ouvert else 0.00011
+            return Quote(bid=1.10, ask=1.10 + spread, tradeable=marche_ouvert)
+
+        async def get_candles(self, instrument, granularity, count):
+            # Graine stable : `hash()` sur une chaîne est randomisé à chaque
+            # processus, le test deviendrait capricieux d'une exécution à l'autre.
+            rng = random.Random(sum(granularity.encode()))
+            # Amplitude plus large sur H4 que sur H1, comme en réel.
+            pas = 0.0004 if granularity == "H4" else 0.0001
+            bougies, prix = [], 1.10
+            for _ in range(count):
+                o = prix
+                c = prix + rng.gauss(0, pas)
+                bougies.append(Candle(
+                    open=o, high=max(o, c) + abs(rng.gauss(0, pas / 2)),
+                    low=min(o, c) - abs(rng.gauss(0, pas / 2)), close=c,
+                ))
+                prix = c
+            return bougies
+
+    return Factice()
+
+
+def _executer(code: str, espace: dict) -> None:
+    """Exécute une cellule, `await` de haut niveau compris, comme IPython."""
+    import ast
+    import asyncio
+
+    compile_ = compile(code, "cellule", "exec",
+                       flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+    resultat = eval(compile_, espace)  # noqa: S307 — code du dépôt, pas d'entrée externe
+    if asyncio.iscoroutine(resultat):
+        asyncio.run(resultat)
+
+
+def test_les_cellules_de_backtest_s_executent_vraiment(capsys):
+    """Exécute les deux dernières cellules de bout en bout.
+
+    Les fautes d'un carnet n'apparaissent qu'à l'exécution, sur le téléphone
+    de quelqu'un, souvent tard. Une vérification syntaxique ne les attrape
+    pas : une variable mal nommée ou un format d'affichage invalide passe la
+    compilation et casse au moment de s'en servir.
+    """
+    backtest, verdict = cellules_de_code()[-2], cellules_de_code()[-1]
+
+    for marche_ouvert in (True, False):
+        espace = {"__name__": "__main__",
+                  "courtier": _courtier_factice(marche_ouvert)}
+        _executer(backtest, espace)
+        _executer(verdict, espace)
+
+        sortie = capsys.readouterr().out
+        assert "Traceback" not in sortie
+        assert "Verdict" in sortie, sortie[-500:]
+
+        libelles = [l for l, _ in espace["resultats"]]
+        if marche_ouvert:
+            assert any("le tien" in l for l in libelles), libelles
+            assert "marché OUVERT" in sortie
+        else:
+            assert not any("le tien" in l for l in libelles), (
+                f"spread de marché fermé retenu : {libelles}"
+            )
+            assert "Marché fermé" in sortie
+        print(f"  marché {'ouvert' if marche_ouvert else 'fermé'} : "
+              f"{len(espace['resultats'])} backtests, sortie cohérente")
 
 
 if __name__ == "__main__":

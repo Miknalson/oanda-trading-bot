@@ -274,7 +274,15 @@ plus muette :
 Le mécanisme est mesurable : l'ATR sur H1 vaut environ le quart de celui sur
 H4, donc le stop est quatre fois plus proche, donc le même spread en ronge
 quatre fois plus. H1 n'est pas « sans signal », il est **trop cher pour le
-spread de ce courtier**.
+spread de ce relevé-là**.
+
+**Le spread ne se relève pas, il se balaie.** Il change d'heure en heure, et
+marché fermé il est élargi et figé. Le carnet vérifie donc `Quote.tradeable`
+avant de retenir un spread live, et teste de toute façon une fourchette
+(0,8 / 1,2 / 2,0 pip) : le spread est le facteur dominant du résultat, pas un
+paramètre de réglage. Deux tests couvrent ça — l'un vérifie sur l'arbre
+syntaxique que le spread live reste sous sa condition, l'autre exécute
+réellement les cellules du carnet marché ouvert puis marché fermé.
 
 **« Perdant. »** sur un petit échantillon. Un taux de réussite sous le seuil
 d'équilibre peut très bien n'être que de la malchance. Le résultat calcule
@@ -308,18 +316,30 @@ intervalles courts.
 | Intervalle | Trades | Réussite | Seuil | P/L | Malchance | Verdict |
 |---|---|---|---|---|---|---|
 | H1 | — | — | — | — | — | AUCUN TRADE (spread > 15 % du stop) |
-| H4 | 65 | 33,8 % | 41,0 % | −29,18 | 14,7 % | NON CONCLUANT |
+| H4 | 65 | 33,8 % | 41,0 % | −29,18 | 14,6 % | NON CONCLUANT |
 
-Lecture honnête : **ce passage ne condamne pas la stratégie et ne la sauve
-pas.** 65 trades à 7 points sous le seuil, c'est un tirage qui arriverait par
-pure malchance environ une fois sur sept — il en faudrait environ **170** au
-même taux pour conclure. Et H1 n'a rien mesuré du tout : le spread du compte
-de simulation Saxo y refusait chaque entrée.
+**Ce passage ne condamne pas la stratégie et ne la sauve pas**, pour trois
+raisons distinctes.
 
-Ce que ça dit vraiment, et qui compte : **1200 bougies ne suffisent pas.**
-C'est la limite d'une requête chez Saxo, et la prochaine étape utile n'est
-pas de changer la stratégie mais d'aller chercher plus d'historique
-(pagination par date dans les clients) ou d'autres instruments.
+*Trop peu de trades.* 65 trades à 7 points sous le seuil, c'est un tirage qui
+arriverait par pure malchance environ une fois sur sept. Il en faudrait
+environ **134** au même taux pour conclure.
+
+*Un spread de marché fermé.* Le relevé a été fait un samedi soir, marché des
+changes fermé (il ferme le vendredi vers 21 h UTC et rouvre le dimanche vers
+21 h UTC). Saxo affichait alors **0,00052, soit 5,2 pips** sur EUR/USD, là où
+les heures d'ouverture donnent 0,6 à 1,5 pip. Ce spread élargi et figé a été
+appliqué aux 1200 bougies de cotations *en semaine* : il a fait refuser
+100 % des entrées sur H1, et décalé de 5,2 pips au lieu de 1 les stops et
+objectifs de H4. `analysis.py` refusait déjà de trader sur un `Quote` non
+négociable ; le carnet, lui, ne regardait pas. Il le fait maintenant, et
+**balaie une fourchette de spreads** au lieu d'en relever un seul — parce
+qu'un verdict ne vaut que pour le spread qui l'a produit.
+
+*1200 bougies ne suffisent pas.* C'est la limite d'une requête chez Saxo. La
+prochaine étape utile n'est donc pas de retoucher la stratégie — ce serait du
+bricolage sur du bruit — mais d'aller chercher plus d'historique (pagination
+par date dans les clients) ou d'autres instruments.
 
 ## Notifications : paliers 25 / 50 / 75 / 100 %
 

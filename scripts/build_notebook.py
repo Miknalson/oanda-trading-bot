@@ -141,6 +141,14 @@ le financement (déduit du résultat).
 Le chiffre qui décide de tout est le **taux de réussite comparé au seuil
 d'équilibre**. En dessous, la stratégie perd de l'argent — quoi qu'en dise
 l'impression générale.
+
+⚠️ **Le spread ne se relève pas, il se balaie.** Un seul relevé instantané
+ne dit rien sur 1200 bougies : il change d'heure en heure, et **marché fermé
+il est élargi et figé**. Un premier essai un samedi soir a relevé 5,2 pips
+sur EUR/USD (le normal est 0,6 à 1,5) et a fait refuser *toutes* les entrées
+sur H1 — ce qui ressemblait à « aucun signal » n'était qu'un spread de
+week-end. Le carnet teste donc une fourchette de spreads, et n'utilise le
+tien que si le marché est réellement ouvert.
 """),
 code("""from app.backtest import run_backtest, fetch_history
 
@@ -148,22 +156,51 @@ INSTRUMENT = "EUR_USD"
 INTERVALLES = ["H1", "H4"]   # M1 et M5 sont refusés : le spread y est ruineux
 BOUGIES = 1200               # plafond par requête chez Saxo
 
+cours = await courtier.get_quote(INSTRUMENT)
+pips = cours.spread * 10000
+etat = "OUVERT" if cours.tradeable else "FERMÉ"
+print(f"Spread instantané : {cours.spread:.5f} ({pips:.1f} pip) — marché {etat}")
+
+# Marché fermé, le spread affiché est élargi et figé : l'appliquer à 1200
+# bougies de cotations en semaine fausse tout le backtest. C'est exactement
+# ce qui s'est produit au premier essai, un samedi soir.
+if not cours.tradeable:
+    print("⚠️ Marché fermé : ce spread ne représente pas les conditions de")
+    print("   trading réelles. Il n'est PAS utilisé ci-dessous.")
+
+# Le spread ne modifie pas un détail du résultat, il le décide. On balaie
+# donc une fourchette réaliste pour EUR/USD au lieu de parier sur un relevé.
+SPREADS = {
+    "0,8 pip (serré)": 0.00008,
+    "1,2 pip (courant)": 0.00012,
+    "2,0 pip (large)": 0.00020,
+}
+if cours.tradeable:
+    SPREADS[f"{pips:.1f} pip (le tien)"] = cours.spread
+
+# L'historique ne dépend pas du spread : une seule requête par intervalle.
+historique = {}
+for g in INTERVALLES:
+    historique[g] = await fetch_history(courtier, INSTRUMENT, g, BOUGIES)
+    print(f"{g} : {len(historique[g])} bougies")
+
 resultats = []
 for g in INTERVALLES:
-    bougies = await fetch_history(courtier, INSTRUMENT, g, BOUGIES)
-    cours = await courtier.get_quote(INSTRUMENT)
-    r = run_backtest(
-        bougies, instrument=INSTRUMENT, granularity=g,
-        spread=cours.spread, reward_ratio=1.5, risk_amount=2.5,
-        financing_rate_annual=0.02,
-    )
-    resultats.append(r)
-    print(r.summary())
-    print()"""),
+    for libelle, sp in SPREADS.items():
+        r = run_backtest(
+            historique[g], instrument=INSTRUMENT, granularity=g,
+            spread=sp, reward_ratio=1.5, risk_amount=2.5,
+            financing_rate_annual=0.02,
+        )
+        resultats.append((libelle, r))
+
+for libelle, r in resultats:
+    print(f"\\n--- spread {libelle} ---")
+    print(r.summary())"""),
 
 md("""## 5. Le verdict
 
-Une lecture directe, sans enrobage — mais **prudente sur deux points** qui
+Une lecture directe, sans enrobage — mais **prudente sur trois points** qui
 font dire n'importe quoi à un backtest :
 
 1. *Aucun trade* n'est pas un résultat. Le carnet dit toujours pourquoi :
@@ -174,51 +211,67 @@ font dire n'importe quoi à un backtest :
    sous le seuil d'équilibre arrive par simple malchance à peu près une fois
    sur sept. Tant que ce n'est pas tranché, le carnet affiche
    **NON CONCLUANT** et dit combien de trades il faudrait.
+3. *Un verdict vaut pour un spread donné.* Lis toujours la ligne avec sa
+   colonne Spread. La même stratégie peut être gagnante à 0,8 pip et
+   intradable à 2 pips.
 """),
-code("""print(f"{'Intervalle':<12}{'Trades':>8}{'Réussite':>11}{'Seuil':>9}{'P/L':>11}{'Malchance':>11}  Verdict")
-print("-" * 74)
-for r in resultats:
+code("""print(f"{'Interv.':<9}{'Spread':<20}{'Trades':>7}{'Réussite':>10}{'Seuil':>8}"
+      f"{'P/L':>10}{'Malch.':>8}  Verdict")
+print("-" * 86)
+for libelle, r in resultats:
     if not r.closed:
-        print(f"{r.granularity:<12}{'—':>8}{'—':>11}{'—':>9}{'—':>11}{'—':>11}  AUCUN TRADE")
+        print(f"{r.granularity:<9}{libelle:<20}{'—':>7}{'—':>10}{'—':>8}"
+              f"{'—':>10}{'—':>8}  AUCUN TRADE")
         continue
-    print(f"{r.granularity:<12}{len(r.closed):>8}{r.win_rate:>10.1%}"
-          f"{r.breakeven_win_rate:>9.1%}{r.net_pl:>+11.2f}{r.p_value:>10.1%}  {r.verdict}")
+    print(f"{r.granularity:<9}{libelle:<20}{len(r.closed):>7}{r.win_rate:>9.1%}"
+          f"{r.breakeven_win_rate:>8.1%}{r.net_pl:>+10.2f}{r.p_value:>8.1%}  {r.verdict}")
 
 # Une ligne vide n'est pas une information : dire pourquoi.
-for r in resultats:
+for libelle, r in resultats:
     if not r.closed:
-        print(f"\\n{r.granularity} — aucun trade : {r.no_trade_reason()}")
+        print(f"\\n{r.granularity} / spread {libelle} — {r.no_trade_reason()}")
 
 print()
-concluants = [r for r in resultats if r.is_conclusive]
-gagnants = [r for r in concluants if r.expectancy > 0]
-perdants = [r for r in concluants if r.expectancy <= 0]
-indecis = [r for r in resultats if r.closed and not r.is_conclusive]
+concluants = [(l, r) for l, r in resultats if r.is_conclusive]
+gagnants = [(l, r) for l, r in concluants if r.expectancy > 0]
+perdants = [(l, r) for l, r in concluants if r.expectancy <= 0]
+indecis = [(l, r) for l, r in resultats if r.closed and not r.is_conclusive]
 
 if gagnants:
-    noms = ", ".join(r.granularity for r in gagnants)
-    print(f"Rentable de façon statistiquement nette : {noms}.")
+    print("Rentable de façon statistiquement nette :")
+    for l, r in gagnants:
+        print(f"  {r.granularity} à {l}")
     print("⚠️ Une période favorable ne prouve pas une stratégie : teste sur")
     print("   plusieurs instruments et plusieurs années avant d'y mettre un euro.")
+    print("   Et vérifie le spread que ton courtier facture VRAIMENT en semaine.")
 
 if perdants:
-    noms = ", ".join(r.granularity for r in perdants)
-    print(f"Perdant de façon statistiquement nette : {noms}.")
+    print("Perdant de façon statistiquement nette :")
+    for l, r in perdants:
+        print(f"  {r.granularity} à {l}")
     print("C'est une réponse utile : tu l'as obtenue sans risquer un centime.")
 
 if indecis:
     print("Indécis — l'échantillon ne permet pas de conclure :")
-    for r in indecis:
+    for l, r in indecis:
         besoin = r.trades_needed()
         combien = f"il en faudrait ~{besoin}" if besoin else "bien davantage"
-        print(f"  {r.granularity} : {len(r.closed)} trades seulement, {combien}.")
+        print(f"  {r.granularity} à {l} : {len(r.closed)} trades, {combien}.")
     print("Ne conclus rien de ces lignes, ni en bien ni en mal. Pour trancher il")
     print("faut plus d'historique (pagination par date, voir fetch_history) ou")
     print("plusieurs instruments.")
 
 if not concluants and not indecis:
     print("Aucun trade nulle part — regarde les motifs ci-dessus avant de")
-    print("changer quoi que ce soit à la stratégie.")"""),
+    print("changer quoi que ce soit à la stratégie.")
+
+# La leçon du balayage, à ne pas rater.
+taux = [r.win_rate for _, r in resultats if r.closed]
+if len(taux) > 1 and max(taux) - min(taux) > 0.02:
+    print()
+    print(f"Le spread seul déplace le taux de réussite de {min(taux):.1%} à "
+          f"{max(taux):.1%}.")
+    print("Ce n'est pas un détail de réglage : c'est le facteur dominant.")"""),
 ]
 
 nb = {
