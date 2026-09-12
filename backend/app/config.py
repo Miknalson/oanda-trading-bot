@@ -16,6 +16,16 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class Settings:
+    # Quel courtier utiliser : "saxo" ou "oanda". Voir broker.py pour le
+    # contrat que chacun implémente.
+    broker: str
+    # --- Saxo (OpenAPI) ---
+    # Jeton du portail développeur, valable 24 h :
+    # https://www.developer.saxo/accounts/sim/signup
+    saxo_access_token: str
+    # "sim" (simulation, argent fictif) ou "live" (argent réel).
+    saxo_environment: str
+    # --- OANDA (API REST v20) ---
     oanda_api_key: str
     oanda_account_id: str
     # "practice" (compte démo, argent fictif) ou "live" (argent réel).
@@ -50,13 +60,10 @@ class Settings:
     vapid_claim_email: str
 
     @property
-    def oanda_base_url(self) -> str:
-        if self.oanda_environment == "live":
-            return "https://api-fxtrade.oanda.com"
-        return "https://api-fxpractice.oanda.com"
-
-    @property
     def is_live(self) -> bool:
+        """Vrai si le courtier actif engage de l'argent réel."""
+        if self.broker == "saxo":
+            return self.saxo_environment == "live"
         return self.oanda_environment == "live"
 
     @property
@@ -68,6 +75,9 @@ class Settings:
 @lru_cache
 def get_settings() -> Settings:
     return Settings(
+        broker=os.environ.get("BROKER", "saxo").lower(),
+        saxo_access_token=os.environ.get("SAXO_ACCESS_TOKEN", ""),
+        saxo_environment=os.environ.get("SAXO_ENVIRONMENT", "sim"),
         oanda_api_key=os.environ.get("OANDA_API_KEY", ""),
         oanda_account_id=os.environ.get("OANDA_ACCOUNT_ID", ""),
         oanda_environment=os.environ.get("OANDA_ENVIRONMENT", "practice"),

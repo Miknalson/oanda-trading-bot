@@ -13,7 +13,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 
-from .oanda_client import OandaClient, OandaError
+from .broker import Broker, BrokerError
 
 
 @dataclass
@@ -26,8 +26,8 @@ class VolatilityResult:
 
 
 class VolatilityScanner:
-    def __init__(self, client: OandaClient | None = None, cache_ttl_seconds: int = 30) -> None:
-        self.client = client or OandaClient()
+    def __init__(self, client: Broker, cache_ttl_seconds: int = 30) -> None:
+        self.client = client
         self.cache_ttl_seconds = cache_ttl_seconds
         self._cache: list[VolatilityResult] | None = None
         self._cache_timestamp: float = 0.0
@@ -37,20 +37,20 @@ class VolatilityScanner:
     ) -> VolatilityResult | None:
         try:
             candles = await self.client.get_candles(instrument, granularity, count)
-        except OandaError:
+        except BrokerError:
             # Un instrument indisponible ne doit pas faire planter tout le scan.
             return None
 
         if not candles:
             return None
 
-        highs = [float(c["mid"]["h"]) for c in candles if c.get("mid")]
-        lows = [float(c["mid"]["l"]) for c in candles if c.get("mid")]
+        highs = [c.high for c in candles]
+        lows = [c.low for c in candles]
         if not highs or not lows:
             return None
 
         high, low = max(highs), min(lows)
-        last_price = float(candles[-1]["mid"]["c"])
+        last_price = candles[-1].close
         if low <= 0:
             return None
 
@@ -80,8 +80,7 @@ class VolatilityScanner:
             return self._cache[:limit]
 
         if instruments is None:
-            all_instruments = await self.client.list_tradable_instruments()
-            instruments = [i["name"] for i in all_instruments]
+            instruments = await self.client.list_instruments()
 
         tasks = [self._compute_volatility(name, granularity, count) for name in instruments]
         results = await asyncio.gather(*tasks)

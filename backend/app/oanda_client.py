@@ -1,21 +1,29 @@
-"""Client HTTP minimal pour l'API REST v20 d'OANDA.
+"""Courtier OANDA (API REST v20).
 
-Contient à la fois les appels en lecture seule (instruments, bougies,
-solde de compte, positions ouvertes) et le passage d'ordre (Phase 3).
-Le passage d'ordre est protégé côté application par `Settings.orders_allowed`
-— voir main.py — jamais directement ici.
+⚠️ Disponibilité : l'entité européenne d'OANDA (OANDA TMS Brokers, qui sert
+les clients français depuis 2023) ne propose PAS cette API — son offre passe
+par MetaTrader 5. Ce client reste utilisable avec les entités qui exposent
+v20 (OANDA Corporation, Global Markets, Australia, Asia Pacific).
 
-Doc officielle : https://developer.oanda.com/rest-live-v20/introduction/
+Doc : https://developer.oanda.com/rest-live-v20/introduction/
 """
 from __future__ import annotations
 
 import httpx
 
+from .broker import (
+    AccountSummary,
+    BrokerError,
+    Candle,
+    OpenTrade,
+    Quote,
+    TradeStatus,
+)
 from .config import Settings, get_settings
 
 
-class OandaError(RuntimeError):
-    """Erreur renvoyée par l'API OANDA (statut HTTP non-2xx)."""
+class OandaError(BrokerError):
+    """Conservé pour compatibilité — alias de BrokerError."""
 
 
 class OandaClient:
@@ -24,8 +32,14 @@ class OandaClient:
         if not self.settings.oanda_api_key:
             raise OandaError(
                 "OANDA_API_KEY manquant. Copie backend/.env.example en backend/.env "
-                "et renseigne ta clé API (compte démo recommandé pour commencer)."
+                "et renseigne ta clé API."
             )
+
+    @property
+    def _base_url(self) -> str:
+        if self.settings.oanda_environment == "live":
+            return "https://api-fxtrade.oanda.com"
+        return "https://api-fxpractice.oanda.com"
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -33,72 +47,72 @@ class OandaClient:
             "Content-Type": "application/json",
         }
 
-    async def list_tradable_instruments(self) -> list[dict]:
-        """Retourne les instruments disponibles sur le compte configuré."""
-        url = (
-            f"{self.settings.oanda_base_url}/v3/accounts/"
-            f"{self.settings.oanda_account_id}/instruments"
-        )
+    async def _get(self, path: str, params: dict | None = None) -> dict:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers=self._headers())
+            resp = await client.get(
+                f"{self._base_url}{path}", headers=self._headers(), params=params
+            )
         if resp.status_code != 200:
             raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
-        return resp.json().get("instruments", [])
+        return resp.json()
+
+    @property
+    def _account_path(self) -> str:
+        return f"/v3/accounts/{self.settings.oanda_account_id}"
+
+    # ---- Interface Broker ------------------------------------------------
+
+    async def list_instruments(self) -> list[str]:
+        data = await self._get(f"{self._account_path}/instruments")
+        return [i["name"] for i in data.get("instruments", [])]
 
     async def get_candles(
         self, instrument: str, granularity: str = "M5", count: int = 50
-    ) -> list[dict]:
-        """Récupère les N dernières bougies pour un instrument.
-
-        granularity: ex. "M1", "M5", "M15", "H1", "H4", "D".
-        """
-        url = f"{self.settings.oanda_base_url}/v3/instruments/{instrument}/candles"
-        params = {"granularity": granularity, "count": count, "price": "M"}
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers=self._headers(), params=params)
-        if resp.status_code != 200:
-            raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
-        return resp.json().get("candles", [])
-
-    async def get_account_summary(self) -> dict:
-        """Solde, devise et P/L non réalisé du compte."""
-        url = (
-            f"{self.settings.oanda_base_url}/v3/accounts/"
-            f"{self.settings.oanda_account_id}/summary"
+    ) -> list[Candle]:
+        data = await self._get(
+            f"/v3/instruments/{instrument}/candles",
+            {"granularity": granularity, "count": count, "price": "M"},
         )
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers=self._headers())
-        if resp.status_code != 200:
-            raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
-        return resp.json().get("account", {})
+        return [
+            Candle(
+                open=float(c["mid"]["o"]),
+                high=float(c["mid"]["h"]),
+                low=float(c["mid"]["l"]),
+                close=float(c["mid"]["c"]),
+            )
+            for c in data.get("candles", [])
+            if c.get("mid")
+        ]
 
-    async def list_open_trades(self) -> list[dict]:
-        url = (
-            f"{self.settings.oanda_base_url}/v3/accounts/"
-            f"{self.settings.oanda_account_id}/openTrades"
+    async def get_quote(self, instrument: str) -> Quote:
+        data = await self._get(
+            f"{self._account_path}/pricing", {"instruments": instrument}
         )
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers=self._headers())
-        if resp.status_code != 200:
-            raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
-        return resp.json().get("trades", [])
+        for entry in data.get("prices", []):
+            bids, asks = entry.get("bids") or [], entry.get("asks") or []
+            if not bids or not asks:
+                continue
+            return Quote(
+                bid=float(bids[0]["price"]),
+                ask=float(asks[0]["price"]),
+                tradeable=entry.get("tradeable", True),
+            )
+        raise OandaError(f"Aucun prix disponible pour {instrument}.")
 
-    async def create_market_order_with_brackets(
+    async def get_account_summary(self) -> AccountSummary:
+        account = (await self._get(f"{self._account_path}/summary")).get("account", {})
+        return AccountSummary(
+            balance=float(account.get("balance", 0)),
+            currency=account.get("currency", ""),
+        )
+
+    async def place_market_order(
         self,
         instrument: str,
         units: int,
         stop_loss_price: float,
         take_profit_price: float,
-    ) -> dict:
-        """Passe un ordre au marché avec stop-loss ET take-profit attachés.
-
-        C'est OANDA qui gère la fermeture automatique de la position une
-        fois l'un des deux prix atteint — ça ne dépend pas de notre serveur
-        qui pourrait être arrêté ou injoignable à ce moment-là.
-
-        `units` positif = achat, négatif = vente.
-        """
-        url = f"{self.settings.oanda_base_url}/v3/accounts/{self.settings.oanda_account_id}/orders"
+    ) -> str:
         body = {
             "order": {
                 "type": "MARKET",
@@ -111,57 +125,43 @@ class OandaClient:
             }
         }
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, headers=self._headers(), json=body)
+            resp = await client.post(
+                f"{self._base_url}{self._account_path}/orders",
+                headers=self._headers(),
+                json=body,
+            )
         if resp.status_code not in (200, 201):
             raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
-        return resp.json()
 
-    async def get_trade(self, trade_id: str) -> dict:
-        """État d'un trade précis : "OPEN" ou "CLOSED", et son P/L réalisé.
-
-        C'est ce qui permet à une session de savoir quand le stop-loss ou le
-        take-profit a été touché, et combien le trade a réellement rapporté
-        ou coûté — sans se fier à une estimation locale.
-        """
-        url = (
-            f"{self.settings.oanda_base_url}/v3/accounts/"
-            f"{self.settings.oanda_account_id}/trades/{trade_id}"
+        result = resp.json()
+        trade_id = (
+            result.get("orderFillTransaction", {}).get("tradeOpened", {}).get("tradeID")
         )
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers=self._headers())
-        if resp.status_code != 200:
-            raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
-        return resp.json().get("trade", {})
+        if not trade_id:
+            raise OandaError(
+                f"Ordre passé mais aucun tradeID renvoyé par OANDA : {result}"
+            )
+        return trade_id
 
-    async def get_pricing(self, instruments: list[str]) -> dict[str, dict]:
-        """Prix acheteur/vendeur actuels, et donc le spread réellement payé.
-
-        Les bougies renvoient des prix *médians* : s'en servir pour calculer
-        une entrée revient à ignorer le spread, et donc à sous-estimer le
-        coût de chaque trade. Pour dimensionner correctement une position il
-        faut le vrai prix auquel l'ordre sera exécuté — `ask` à l'achat,
-        `bid` à la vente.
-        """
-        url = (
-            f"{self.settings.oanda_base_url}/v3/accounts/"
-            f"{self.settings.oanda_account_id}/pricing"
+    async def get_trade_status(self, trade_id: str) -> TradeStatus:
+        trade = (await self._get(f"{self._account_path}/trades/{trade_id}")).get(
+            "trade", {}
         )
-        params = {"instruments": ",".join(instruments)}
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers=self._headers(), params=params)
-        if resp.status_code != 200:
-            raise OandaError(f"OANDA a renvoyé {resp.status_code}: {resp.text}")
+        return TradeStatus(
+            closed=trade.get("state") == "CLOSED",
+            market_pl=float(trade.get("realizedPL", 0)),
+            financing=float(trade.get("financing", 0)),
+        )
 
-        prices: dict[str, dict] = {}
-        for entry in resp.json().get("prices", []):
-            bids, asks = entry.get("bids") or [], entry.get("asks") or []
-            if not bids or not asks:
-                continue
-            bid, ask = float(bids[0]["price"]), float(asks[0]["price"])
-            prices[entry["instrument"]] = {
-                "bid": bid,
-                "ask": ask,
-                "spread": ask - bid,
-                "tradeable": entry.get("tradeable", True),
-            }
-        return prices
+    async def list_open_trades(self) -> list[OpenTrade]:
+        trades = (await self._get(f"{self._account_path}/openTrades")).get("trades", [])
+        return [
+            OpenTrade(
+                trade_id=t["id"],
+                instrument=t["instrument"],
+                units=float(t.get("currentUnits", 0)),
+                price=float(t.get("price", 0)),
+                unrealized_pl=float(t.get("unrealizedPL", 0)),
+            )
+            for t in trades
+        ]

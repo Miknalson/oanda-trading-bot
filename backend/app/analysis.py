@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .broker import Broker, BrokerError
 from .indicators import atr, trend_direction
-from .oanda_client import OandaClient, OandaError
 from .risk import compute_position_size
 
 # Multiplicateur appliqué à l'ATR pour fixer la distance du stop-loss.
@@ -54,7 +54,7 @@ class TradeSuggestion:
 
 
 class TradeAnalyzer:
-    def __init__(self, client: OandaClient) -> None:
+    def __init__(self, client: Broker) -> None:
         self.client = client
 
     async def suggest(
@@ -88,16 +88,16 @@ class TradeAnalyzer:
 
         candles = await self.client.get_candles(instrument, granularity, count)
         if len(candles) < 20:
-            raise OandaError(
+            raise BrokerError(
                 f"Pas assez de données ({len(candles)} bougies) pour analyser {instrument}"
             )
 
-        closes = [float(c["mid"]["c"]) for c in candles if c.get("mid")]
+        closes = [c.close for c in candles]
         direction = trend_direction(closes)
         atr_value = atr(candles)
 
         if direction is None or atr_value is None or atr_value <= 0:
-            raise OandaError(
+            raise BrokerError(
                 f"Impossible de déterminer une tendance fiable pour {instrument} "
                 "avec les données disponibles."
             )
@@ -106,14 +106,13 @@ class TradeAnalyzer:
 
         # Prix réels d'exécution : on achète au `ask`, on vend au `bid`.
         # Utiliser le prix médian des bougies masquerait le spread.
-        pricing = await self.client.get_pricing([instrument])
-        quote = pricing.get(instrument)
-        if quote is None:
-            raise OandaError(f"Aucun prix disponible pour {instrument}.")
-        if not quote.get("tradeable", True):
-            raise OandaError(f"{instrument} n'est pas négociable actuellement (marché fermé ?).")
+        quote = await self.client.get_quote(instrument)
+        if not quote.tradeable:
+            raise BrokerError(
+                f"{instrument} n'est pas négociable actuellement (marché fermé ?)."
+            )
 
-        spread = quote["spread"]
+        spread = quote.spread
         spread_ratio = spread / stop_distance if stop_distance > 0 else float("inf")
         if spread_ratio > max_spread_ratio:
             raise SpreadTooWideError(
@@ -123,16 +122,16 @@ class TradeAnalyzer:
                 f"(H1/H4) ou choisis un instrument moins cher."
             )
 
-        entry_price = quote["ask"] if direction == "buy" else quote["bid"]
+        entry_price = quote.ask if direction == "buy" else quote.bid
 
         account = await self.client.get_account_summary()
-        balance = float(account.get("balance", 0))
+        balance = account.balance
         if balance <= 0:
-            raise OandaError("Solde de compte introuvable ou nul.")
+            raise BrokerError("Solde de compte introuvable ou nul.")
 
         sizing = compute_position_size(balance, risk_pct, stop_distance)
         if sizing.units <= 0:
-            raise OandaError(
+            raise BrokerError(
                 "Le montant à risquer est trop faible pour ouvrir une position "
                 "(taille calculée = 0 unité). Augmente risk_pct ou ton solde."
             )

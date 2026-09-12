@@ -17,12 +17,15 @@ def true_range(high: float, low: float, prev_close: float) -> float:
     return max(high - low, abs(high - prev_close), abs(low - prev_close))
 
 
-def atr(candles: list[dict], period: int = 14) -> float | None:
+def atr(candles, period: int = 14) -> float | None:
     """Average True Range — mesure de volatilité, utilisée pour dimensionner
-    le stop-loss proportionnellement au mouvement récent du marché."""
-    closes = [float(c["mid"]["c"]) for c in candles if c.get("mid")]
-    highs = [float(c["mid"]["h"]) for c in candles if c.get("mid")]
-    lows = [float(c["mid"]["l"]) for c in candles if c.get("mid")]
+    le stop-loss proportionnellement au mouvement récent du marché.
+
+    Prend des `Candle` (voir broker.py) : aucun format de courtier ici.
+    """
+    closes = [c.close for c in candles]
+    highs = [c.high for c in candles]
+    lows = [c.low for c in candles]
     if len(closes) < period + 1:
         return None
 

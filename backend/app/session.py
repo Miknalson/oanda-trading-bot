@@ -31,7 +31,7 @@ from .analysis import SpreadTooWideError, TradeAnalyzer
 from .config import Settings
 from .milestones import Milestone, MilestoneTracker, session_end_notice
 from .notifier import Notifier
-from .oanda_client import OandaClient, OandaError
+from .broker import Broker, BrokerError
 
 # Combien de temps on attend au maximum qu'un trade se ferme avant de
 # considérer que quelque chose cloche et d'arrêter la session.
@@ -125,7 +125,7 @@ class SessionManager:
     """Détient au plus UNE session active, et sa boucle asyncio."""
 
     def __init__(
-        self, client: OandaClient, settings: Settings, notifier: Notifier | None = None
+        self, client: Broker, settings: Settings, notifier: Notifier | None = None
     ) -> None:
         self.client = client
         self.settings = settings
@@ -173,7 +173,7 @@ class SessionManager:
         # Plafond serveur : la perte max ne peut pas dépasser une fraction
         # du solde réel, quoi que le client demande.
         account = await self.client.get_account_summary()
-        balance = float(account.get("balance", 0))
+        balance = account.balance
         if balance <= 0:
             raise SessionError("Solde de compte introuvable ou nul.")
         server_cap = balance * self.settings.max_session_loss_pct
@@ -268,24 +268,12 @@ class SessionManager:
                     self._finish(session, "max_loss_would_be_exceeded")
                     return
 
-                order = await self.client.create_market_order_with_brackets(
+                trade_id = await self.client.place_market_order(
                     instrument=suggestion.instrument,
                     units=suggestion.suggested_units,
                     stop_loss_price=suggestion.stop_loss_price,
                     take_profit_price=suggestion.take_profit_price,
                 )
-                trade_id = (
-                    order.get("orderFillTransaction", {})
-                    .get("tradeOpened", {})
-                    .get("tradeID")
-                )
-                if not trade_id:
-                    self._finish(
-                        session,
-                        "error",
-                        f"Ordre passé mais aucun tradeID renvoyé par OANDA : {order}",
-                    )
-                    return
 
                 trade = SessionTrade(
                     trade_id=trade_id,
@@ -326,7 +314,7 @@ class SessionManager:
         except asyncio.CancelledError:
             # Arrêt manuel : _finish a déjà été appelé par stop().
             raise
-        except OandaError as exc:
+        except BrokerError as exc:
             self._finish(session, "error", str(exc))
         except Exception as exc:  # noqa: BLE001 - on arrête plutôt que de trader à l'aveugle
             self._finish(session, "error", f"{type(exc).__name__}: {exc}")
@@ -355,24 +343,22 @@ class SessionManager:
             )
 
     async def _wait_for_close(self, trade: SessionTrade) -> float | None:
-        """Attend la fermeture du trade chez OANDA, renvoie son résultat NET.
+        """Attend la fermeture du trade chez le courtier, renvoie le résultat NET.
 
-        OANDA sépare `realizedPL` (le résultat de marché) et `financing`
-        (les intérêts payés ou perçus pour avoir gardé la position ouverte,
-        facturés chaque nuit). Ne lire que le premier sous-estime le coût
-        réel : sur H1/H4 un trade traverse souvent une ou plusieurs nuits.
-        Le total est donc la somme des deux.
+        Le résultat se compose de deux parties que les courtiers exposent
+        séparément : le gain ou la perte de marché, et les intérêts de
+        détention facturés chaque nuit. Ne compter que la première
+        sous-estime le coût réel — sur H1/H4 un trade traverse souvent une
+        ou plusieurs nuits. `TradeStatus.net_pl` additionne les deux.
         """
         waited = 0.0
         poll = self.settings.session_poll_seconds
         while waited < TRADE_TIMEOUT_SECONDS:
             await asyncio.sleep(poll)
             waited += poll
-            detail = await self.client.get_trade(trade.trade_id)
-            if detail.get("state") == "CLOSED":
-                market_pl = float(detail.get("realizedPL", 0))
-                financing = float(detail.get("financing", 0))
-                trade.market_pl = market_pl
-                trade.financing = financing
-                return market_pl + financing
+            status = await self.client.get_trade_status(trade.trade_id)
+            if status.closed:
+                trade.market_pl = status.market_pl
+                trade.financing = status.financing
+                return status.net_pl
         return None

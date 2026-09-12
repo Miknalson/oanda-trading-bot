@@ -41,6 +41,7 @@ import asyncio
 from dataclasses import dataclass, field
 
 from .analysis import ATR_STOP_MULTIPLIER
+from .broker import Candle
 from .indicators import atr, trend_direction
 
 # Périodes des indicateurs — doivent rester alignées sur indicators.py.
@@ -161,12 +162,8 @@ class BacktestResult:
         )
 
 
-def _mid(candle: dict, key: str) -> float:
-    return float(candle["mid"][key])
-
-
 def run_backtest(
-    candles: list[dict],
+    candles: list[Candle],
     *,
     instrument: str = "?",
     granularity: str = "?",
@@ -203,7 +200,7 @@ def run_backtest(
         # --- Position ouverte : le stop ou l'objectif est-il touché ? ---
         if open_trade is not None:
             bar = candles[i]
-            high, low = _mid(bar, "h"), _mid(bar, "l")
+            high, low = bar.high, bar.low
 
             if open_trade.direction == "buy":
                 hit_tp = high >= open_trade.take_profit
@@ -243,7 +240,7 @@ def run_backtest(
 
         # --- Pas de position : chercher un signal sur le passé seulement ---
         history = candles[: i + 1]
-        closes = [_mid(c, "c") for c in history]
+        closes = [c.close for c in history]
         direction = trend_direction(closes, FAST_PERIOD, SLOW_PERIOD)
         atr_value = atr(history, ATR_PERIOD)
         if direction is None or not atr_value or atr_value <= 0:
@@ -254,7 +251,7 @@ def run_backtest(
             continue
 
         # Entrée à l'ouverture de la bougie SUIVANTE (prix médian).
-        entry = _mid(candles[i + 1], "o")
+        entry = candles[i + 1].open
         units = risk_amount / stop_distance
         tp_distance = stop_distance * reward_ratio
 
@@ -282,9 +279,12 @@ def run_backtest(
     return result
 
 
-async def fetch_history(client, instrument: str, granularity: str, count: int) -> list[dict]:
-    """Récupère `count` bougies en paginant (OANDA plafonne à 5000/requête)."""
-    candles: list[dict] = []
+async def fetch_history(
+    client, instrument: str, granularity: str, count: int
+) -> list[Candle]:
+    """Récupère `count` bougies en paginant (les courtiers plafonnent chaque
+    requête : 5000 chez OANDA, 1200 chez Saxo)."""
+    candles: list[Candle] = []
     remaining = count
     while remaining > 0:
         batch = min(remaining, 5000)
@@ -315,9 +315,9 @@ async def _main() -> None:
     )
     args = parser.parse_args()
 
-    from .oanda_client import OandaClient
+    from .broker_factory import make_broker
 
-    client = OandaClient()
+    client = make_broker()
     candles = await fetch_history(client, args.instrument, args.granularity, args.count)
     result = run_backtest(
         candles,

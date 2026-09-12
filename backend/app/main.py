@@ -18,8 +18,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .analysis import SpreadTooWideError, TradeAnalyzer
+from .broker import Broker, BrokerError
+from .broker_factory import make_broker
 from .config import get_settings
-from .oanda_client import OandaClient, OandaError
 from .scanner import VolatilityScanner
 from .session import SessionError, SessionManager
 
@@ -39,14 +40,14 @@ app.add_middleware(
 )
 
 _scanner: VolatilityScanner | None = None
-_client: OandaClient | None = None
+_client: Broker | None = None
 _sessions: SessionManager | None = None
 
 
-def get_client() -> OandaClient:
+def get_client() -> Broker:
     global _client
     if _client is None:
-        _client = OandaClient(get_settings())
+        _client = make_broker(get_settings())
     return _client
 
 
@@ -72,8 +73,11 @@ async def health() -> dict:
     settings = get_settings()
     return {
         "status": "ok",
-        "environment": settings.oanda_environment,
-        "warning": "LIVE — argent réel" if settings.is_live else "practice — compte démo",
+        "broker": settings.broker,
+        "environment": settings.saxo_environment
+        if settings.broker == "saxo"
+        else settings.oanda_environment,
+        "warning": "LIVE — argent réel" if settings.is_live else "simulation — argent fictif",
     }
 
 
@@ -85,7 +89,7 @@ async def top_volatile(
 ) -> dict:
     try:
         results = await get_scanner().scan(limit=limit, granularity=granularity, count=count)
-    except OandaError as exc:
+    except BrokerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return {
@@ -116,7 +120,7 @@ async def suggest_trade(
         # 409 : rien d'invalide dans la requête, c'est l'état du marché qui
         # rend ce trade non rentable en l'état.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except OandaError as exc:
+    except BrokerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -160,25 +164,25 @@ async def place_order(req: PlaceOrderRequest) -> dict:
         )
 
     try:
-        result = await get_client().create_market_order_with_brackets(
+        result = await get_client().place_market_order(
             instrument=req.instrument,
             units=req.units,
             stop_loss_price=req.stop_loss_price,
             take_profit_price=req.take_profit_price,
         )
-    except OandaError as exc:
+    except BrokerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    return {"environment": settings.oanda_environment, "oanda_response": result}
+    return {"broker": settings.broker, "trade_id": result}
 
 
 @app.get("/api/positions")
 async def open_positions() -> dict:
     try:
         trades = await get_client().list_open_trades()
-    except OandaError as exc:
+    except BrokerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {"trades": trades}
+    return {"trades": [t.__dict__ for t in trades]}
 
 
 class StartSessionRequest(BaseModel):
@@ -230,7 +234,7 @@ async def start_session(req: StartSessionRequest) -> dict:
         )
     except SessionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except OandaError as exc:
+    except BrokerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return session.to_dict()
@@ -274,7 +278,8 @@ async def limits() -> dict:
         "max_trades_per_session": settings.max_trades_per_session,
         "max_spread_ratio": settings.max_spread_ratio,
         "orders_allowed": settings.orders_allowed,
-        "environment": settings.oanda_environment,
+        "broker": settings.broker,
+        "is_live": settings.is_live,
     }
 
 

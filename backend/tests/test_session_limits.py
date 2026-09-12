@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.broker import AccountSummary, Candle, Quote, TradeStatus  # noqa: E402
 from app.config import Settings  # noqa: E402
 from app.session import SessionError, SessionManager  # noqa: E402
 
@@ -21,6 +22,9 @@ BALANCE = 250.0
 
 def make_settings(**overrides) -> Settings:
     base = Settings(
+        broker="oanda",
+        saxo_access_token="",
+        saxo_environment="sim",
         oanda_api_key="fake",
         oanda_account_id="fake",
         oanda_environment="practice",
@@ -48,52 +52,45 @@ class FakeClient:
         self._next_id = 0
         self._pl: dict[str, float] = {}
 
-    async def get_account_summary(self) -> dict:
-        return {"balance": str(self.balance)}
+    async def get_account_summary(self):
+        return AccountSummary(balance=self.balance, currency="EUR")
 
-    async def get_pricing(self, instruments) -> dict:
+    async def get_quote(self, instrument):
         # Spread volontairement minuscule : ces tests portent sur les limites
         # de session, pas sur le coût du spread (couvert par test_spread.py).
         mid = 1.0 + 0.001 * 60
         spread = 0.000001
-        return {
-            instruments[0]: {
-                "bid": mid - spread / 2, "ask": mid + spread / 2,
-                "spread": spread, "tradeable": True,
-            }
-        }
+        return Quote(bid=mid - spread / 2, ask=mid + spread / 2, tradeable=True)
 
-    async def get_candles(self, instrument, granularity="M15", count=100) -> list[dict]:
+    async def get_candles(self, instrument, granularity="M15", count=100):
         # Tendance haussière franche + amplitude constante => ATR > 0.
         candles = []
         price = 1.0
-        for i in range(count):
+        for _ in range(count):
             price += 0.001
             candles.append(
-                {"mid": {"o": f"{price:.5f}", "h": f"{price + 0.002:.5f}",
-                         "l": f"{price - 0.002:.5f}", "c": f"{price:.5f}"}}
+                Candle(open=price, high=price + 0.002, low=price - 0.002, close=price)
             )
         return candles
 
-    async def create_market_order_with_brackets(
+    async def place_market_order(
         self, instrument, units, stop_loss_price, take_profit_price
-    ) -> dict:
+    ) -> str:
         self._next_id += 1
         trade_id = str(self._next_id)
         self.orders.append({"instrument": instrument, "units": units, "trade_id": trade_id})
 
         idx = self._next_id - 1
         outcome = self.outcomes[idx] if idx < len(self.outcomes) else "loss"
-        risk = abs(units) * abs(float(take_profit_price) - float(stop_loss_price)) / 2.5
         # Le P/L réalisé reflète la distance réellement parcourue.
         stop_distance = abs(stop_loss_price - take_profit_price) / 2.5
         risk_amount = abs(units) * stop_distance
         reward_amount = abs(units) * (abs(take_profit_price - stop_loss_price) - stop_distance)
         self._pl[trade_id] = reward_amount if outcome == "win" else -risk_amount
-        return {"orderFillTransaction": {"tradeOpened": {"tradeID": trade_id}}}
+        return trade_id
 
-    async def get_trade(self, trade_id: str) -> dict:
-        return {"state": "CLOSED", "realizedPL": str(self._pl[trade_id])}
+    async def get_trade_status(self, trade_id: str) -> TradeStatus:
+        return TradeStatus(closed=True, market_pl=self._pl[trade_id], financing=0.0)
 
 
 async def run_session(outcomes, *, max_loss, objective, settings=None, balance=BALANCE):
@@ -294,15 +291,10 @@ def test_push_failure_does_not_break_the_session():
 class WideSpreadClient(FakeClient):
     """Comme FakeClient, mais avec un spread ruineux."""
 
-    async def get_pricing(self, instruments):
+    async def get_quote(self, instrument):
         mid = 1.0 + 0.001 * 60
         spread = 0.05  # énorme face au stop calculé
-        return {
-            instruments[0]: {
-                "bid": mid - spread / 2, "ask": mid + spread / 2,
-                "spread": spread, "tradeable": True,
-            }
-        }
+        return Quote(bid=mid - spread / 2, ask=mid + spread / 2, tradeable=True)
 
 
 def test_session_stops_when_spread_too_wide():

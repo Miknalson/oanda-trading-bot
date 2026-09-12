@@ -1,6 +1,45 @@
 # oanda-trading-bot
 
-Scanner de volatilité + assistant de trading via l'[API REST v20 d'OANDA](https://developer.oanda.com/rest-live-v20/introduction/), pensé pour être piloté depuis une PWA mobile.
+Scanner de volatilité + assistant de trading, piloté depuis une PWA mobile.
+Fonctionne avec **Saxo Bank** (OpenAPI) ou **OANDA** (REST v20).
+
+## Choisir un courtier
+
+Le projet a d'abord été écrit contre OANDA, jusqu'à découvrir que **l'entité
+européenne d'OANDA (TMS Brokers, qui sert les clients français depuis 2023)
+ne propose pas l'API REST** — son offre passe par MetaTrader 5. Vérification
+faite sur les trois candidats :
+
+| Courtier | API accessible sans compte réel ? |
+|---|---|
+| OANDA (entité EU/TMS) | ❌ Pas d'API — MetaTrader uniquement |
+| IG | ❌ Exige un compte réel lié, même pour la démo |
+| **Saxo** | ✅ Portail développeur, inscription libre |
+
+**Saxo est donc le défaut.** Son [portail développeur](https://www.developer.saxo/accounts/sim/signup)
+ouvre un environnement de simulation — copie du réel, 100 000 $ fictifs — et
+délivre un jeton immédiatement, sans vérification d'identité.
+
+⚠️ Ce jeton dure **24 heures**. Parfait pour un backtest ou une session de
+test ; pour un bot qui tourne en continu il faudra enregistrer une application
+et implémenter le flux OAuth. Le code distingue une expiration de jeton d'une
+vraie panne, pour ne pas chercher un bug là où il suffit d'en régénérer un.
+
+## Aucun couplage à un courtier
+
+Le premier jet appelait l'API d'OANDA directement : son format JSON
+(`{"mid": {...}}`, `realizedPL`, `orderFillTransaction`) se retrouvait jusque
+dans la logique de stratégie. Changer de courtier en devenait une refonte.
+
+`broker.py` fixe maintenant le contrat — des types neutres (`Candle`,
+`Quote`, `TradeStatus`...) et un protocole que chaque courtier implémente.
+La stratégie, le risque, les sessions et le backtest ne connaissent que ça.
+Ajouter un courtier revient à écrire une classe.
+
+Un test (`tests/test_broker_contract.py`) vérifie que chaque client
+implémente le contrat en entier, et **relit la logique métier pour s'assurer
+qu'aucun format de courtier n'y a resurgi**. C'est ce test qui a rattrapé la
+dernière trace au moment du découplage.
 
 ## ⚠️ Avant de commencer
 

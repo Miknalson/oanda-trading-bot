@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.analysis import SpreadTooWideError, TradeAnalyzer  # noqa: E402
+from app.broker import AccountSummary, Candle, Quote  # noqa: E402
 
 BALANCE = 250.0
 
@@ -21,7 +22,7 @@ class PricedClient:
         self.mid = mid
 
     async def get_account_summary(self):
-        return {"balance": str(BALANCE)}
+        return AccountSummary(balance=BALANCE, currency="EUR")
 
     async def get_candles(self, instrument, granularity="M15", count=100):
         # Hausse régulière (tendance "buy") + amplitude constante => ATR connu.
@@ -30,22 +31,19 @@ class PricedClient:
         for _ in range(count):
             price += 0.0002
             candles.append(
-                {"mid": {"o": f"{price:.5f}", "h": f"{price + half:.5f}",
-                         "l": f"{price - half:.5f}", "c": f"{price:.5f}"}}
+                Candle(open=price, high=price + half, low=price - half, close=price)
             )
         # Dernière clôture au niveau du mid visé.
-        candles[-1]["mid"]["c"] = f"{self.mid:.5f}"
+        last = candles[-1]
+        candles[-1] = Candle(last.open, last.high, last.low, self.mid)
         return candles
 
-    async def get_pricing(self, instruments):
-        return {
-            instruments[0]: {
-                "bid": self.mid - self.spread / 2,
-                "ask": self.mid + self.spread / 2,
-                "spread": self.spread,
-                "tradeable": True,
-            }
-        }
+    async def get_quote(self, instrument):
+        return Quote(
+            bid=self.mid - self.spread / 2,
+            ask=self.mid + self.spread / 2,
+            tradeable=True,
+        )
 
 
 def suggest(spread, *, atr_target=0.0006, max_spread_ratio=0.15, ratio=1.5):

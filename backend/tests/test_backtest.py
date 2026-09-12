@@ -13,10 +13,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.backtest import run_backtest  # noqa: E402
+from app.broker import Candle  # noqa: E402
 
 
 def candle(o, h, l, c):
-    return {"mid": {"o": f"{o:.6f}", "h": f"{h:.6f}", "l": f"{l:.6f}", "c": f"{c:.6f}"}}
+    return Candle(open=o, high=h, low=l, close=c)
 
 
 def random_walk(n, seed=42, start=1.10, step=0.0005):
