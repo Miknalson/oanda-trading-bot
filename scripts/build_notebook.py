@@ -76,21 +76,22 @@ Si cette cellule affiche ton solde, tout le reste fonctionnera. Si elle
 échoue, le message dit quoi faire — le cas le plus courant étant un jeton
 expiré (ils ne durent que 24 h).
 """),
-code("""import asyncio
-from app.broker_factory import make_broker
+code("""from app.broker_factory import make_broker
 from app.broker import BrokerError
 
-async def verifier():
+# `await` directement, sans asyncio.run() : Colab fait déjà tourner une
+# boucle d'événements, et asyncio.run() refuse de s'exécuter dans ce cas
+# (« cannot be called from a running event loop »). Les carnets acceptent
+# await au niveau de la cellule, c'est la façon prévue de faire.
+try:
     courtier = make_broker()
     compte = await courtier.get_account_summary()
     print(f"Solde : {compte.balance:,.2f} {compte.currency}")
+
     cours = await courtier.get_quote("EUR_USD")
     print(f"EUR/USD : vente {cours.bid:.5f} / achat {cours.ask:.5f} "
           f"— spread {cours.spread:.5f}")
-    return courtier
 
-try:
-    courtier = asyncio.run(verifier())
     print("\\n✅ Connexion établie")
 except BrokerError as e:
     print(f"❌ {e}")"""),
@@ -114,22 +115,18 @@ INSTRUMENT = "EUR_USD"
 INTERVALLES = ["H1", "H4"]   # M1 et M5 sont refusés : le spread y est ruineux
 BOUGIES = 1200               # plafond par requête chez Saxo
 
-async def backtester():
-    resultats = []
-    for g in INTERVALLES:
-        bougies = await fetch_history(courtier, INSTRUMENT, g, BOUGIES)
-        cours = await courtier.get_quote(INSTRUMENT)
-        r = run_backtest(
-            bougies, instrument=INSTRUMENT, granularity=g,
-            spread=cours.spread, reward_ratio=1.5, risk_amount=2.5,
-            financing_rate_annual=0.02,
-        )
-        resultats.append(r)
-        print(r.summary())
-        print()
-    return resultats
-
-resultats = asyncio.run(backtester())"""),
+resultats = []
+for g in INTERVALLES:
+    bougies = await fetch_history(courtier, INSTRUMENT, g, BOUGIES)
+    cours = await courtier.get_quote(INSTRUMENT)
+    r = run_backtest(
+        bougies, instrument=INSTRUMENT, granularity=g,
+        spread=cours.spread, reward_ratio=1.5, risk_amount=2.5,
+        financing_rate_annual=0.02,
+    )
+    resultats.append(r)
+    print(r.summary())
+    print()"""),
 
 md("""## 5. Le verdict
 

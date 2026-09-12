@@ -3,3 +3,7 @@ uvicorn[standard]==0.30.6
 httpx==0.27.2
 python-dotenv==1.0.1
 pywebpush==2.0.0
+
+# Pour tester le carnet dans un vrai noyau (dev uniquement)
+ipython==9.17.1
+pytest==9.0.1
