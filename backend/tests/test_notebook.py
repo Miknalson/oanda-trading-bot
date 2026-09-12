@@ -90,6 +90,101 @@ def test_le_carnet_est_a_jour():
     print("  le carnet correspond exactement à son générateur")
 
 
+
+def test_la_cellule_1_recupere_vraiment_les_corrections():
+    """Relancer la cellule 1 doit charger le code corrigé, pas l'ancien.
+
+    Trois caches s'y opposent, et les oublier donne le pire des symptômes :
+    le fichier est bien corrigé sur le disque, et c'est pourtant l'ancienne
+    version qui s'exécute. Le cas s'est produit en conditions réelles — une
+    correction poussée entre deux essais n'était jamais prise en compte.
+
+    Ce test rejoue le scénario complet sur un dépôt local : import, mise à
+    jour côté source, ré-exécution de la logique de la cellule.
+    """
+    import importlib
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    cellule = "".join(
+        [c for c in json.loads(CARNET.read_text())["cells"]
+         if c["cell_type"] == "code"][0]["source"]
+    )
+    for attendu, quoi in [
+        ("del sys.modules", "purge des modules importés"),
+        ("__pycache__", "purge des fichiers compilés"),
+        ("invalidate_caches", "invalidation du cache d'import"),
+        ("reset", "remise à zéro sur la dernière version"),
+    ]:
+        assert attendu in cellule, f"la cellule 1 a perdu : {quoi}"
+
+    # Rejoue le scénario pour de vrai.
+    with tempfile.TemporaryDirectory() as tmp:
+        source = os.path.join(tmp, "source")
+        clone = os.path.join(tmp, "clone")
+        os.makedirs(os.path.join(source, "backend", "app"))
+        open(os.path.join(source, "backend", "app", "__init__.py"), "w").close()
+
+        def ecrire(valeur):
+            chemin = os.path.join(source, "backend", "app", "marqueur_test.py")
+            open(chemin, "w").write(f'VERSION = "{valeur}"\n')
+
+        def commit(message):
+            for cmd in (["add", "-A"],
+                        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", message]):
+                subprocess.run(["git", "-C", source] + cmd, check=True, capture_output=True)
+
+        subprocess.run(["git", "init", "-q", "-b", "main", source], check=True, capture_output=True)
+        ecrire("ancienne")
+        commit("v1")
+
+        def rejouer_cellule_1():
+            if os.path.isdir(clone):
+                subprocess.run(["git", "-C", clone, "fetch", "--depth", "1", "origin", "main"],
+                               check=True, capture_output=True)
+                subprocess.run(["git", "-C", clone, "reset", "--hard", "origin/main"],
+                               check=True, capture_output=True)
+            else:
+                subprocess.run(["git", "clone", "-q", "--depth", "1",
+                                "file://" + source, clone], check=True, capture_output=True)
+            for nom in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+                del sys.modules[nom]
+            for racine, dossiers, _ in os.walk(clone):
+                for d in list(dossiers):
+                    if d == "__pycache__":
+                        shutil.rmtree(os.path.join(racine, d), ignore_errors=True)
+            importlib.invalidate_caches()
+            chemin = os.path.join(clone, "backend")
+            if chemin not in sys.path:
+                sys.path.insert(0, chemin)
+
+        sauvegarde = list(sys.path)
+        modules_avant = set(sys.modules)
+        try:
+            rejouer_cellule_1()
+            from app.marqueur_test import VERSION as v1
+            assert v1 == "ancienne", v1
+
+            # Une correction est poussée, comme entre deux essais.
+            ecrire("corrigee")
+            commit("correction")
+
+            rejouer_cellule_1()
+            from app.marqueur_test import VERSION as v2
+            assert v2 == "corrigee", (
+                f"la correction n'est pas chargée (toujours « {v2} ») — "
+                "un cache n'a pas été vidé"
+            )
+        finally:
+            sys.path[:] = sauvegarde
+            for nom in set(sys.modules) - modules_avant:
+                sys.modules.pop(nom, None)
+
+    print("  correction poussée entre deux passages : bien chargée")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

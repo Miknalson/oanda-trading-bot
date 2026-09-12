@@ -30,19 +30,52 @@ Si le dépôt est public, laisse le champ vide et valide.
 
 S'il est privé, colle un *personal access token* GitHub en lecture seule.
 """),
-code("""import getpass, subprocess, os, sys
+code("""import getpass, importlib, os, shutil, subprocess, sys
 
 REPO = "Miknalson/oanda-trading-bot"
+DOSSIER = "oanda-trading-bot"
 
 gh_token = getpass.getpass("Token GitHub (laisse vide si le dépôt est public) : ").strip()
 url = f"https://{gh_token}@github.com/{REPO}.git" if gh_token else f"https://github.com/{REPO}.git"
 
-if not os.path.isdir("oanda-trading-bot"):
-    subprocess.run(["git", "clone", "--depth", "1", url], check=True)
+# Relancer cette cellule doit TOUJOURS ramener la dernière version. Sans ça,
+# une correction poussée entre deux essais ne serait jamais récupérée : le
+# dossier existe déjà, le clone est sauté, et on réexécute l'ancien code en
+# croyant tester le nouveau.
+if os.path.isdir(DOSSIER):
+    subprocess.run(["git", "-C", DOSSIER, "fetch", "--depth", "1", "origin", "main"], check=True)
+    subprocess.run(["git", "-C", DOSSIER, "reset", "--hard", "origin/main"], check=True)
+else:
+    subprocess.run(["git", "clone", "--depth", "1", url, DOSSIER], check=True)
 
-sys.path.insert(0, "oanda-trading-bot/backend")
+# Trois caches distincts empêchent le code mis à jour d'être réellement
+# chargé. Les oublier donne le pire des symptômes : le fichier est corrigé
+# sur le disque, et c'est pourtant l'ancienne version qui s'exécute.
+#
+# 1. Les modules déjà importés.
+for nom in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+    del sys.modules[nom]
+
+# 2. Les fichiers compilés (.pyc). Python les valide sur la TAILLE et la
+#    DATE : deux versions de même longueur écrites dans la même seconde
+#    passent pour identiques, et l'ancien code est rechargé tel quel.
+for racine, dossiers, _ in os.walk(DOSSIER):
+    for d in list(dossiers):
+        if d == "__pycache__":
+            shutil.rmtree(os.path.join(racine, d), ignore_errors=True)
+
+# 3. Le cache des répertoires du système d'import.
+importlib.invalidate_caches()
+
+chemin = f"{DOSSIER}/backend"
+if chemin not in sys.path:
+    sys.path.insert(0, chemin)
+
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "httpx", "python-dotenv"], check=True)
-print("✅ Code récupéré")"""),
+
+version = subprocess.run(["git", "-C", DOSSIER, "log", "-1", "--format=%h %s"],
+                         capture_output=True, text=True).stdout.strip()
+print(f"✅ Code récupéré — {version}")"""),
 
 md("""## 2. Ton jeton Saxo
 
