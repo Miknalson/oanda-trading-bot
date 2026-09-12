@@ -197,6 +197,19 @@ Ouvre `notebooks/backtest_saxo.ipynb` dans [Google Colab](https://colab.research
 Le carnet récupère le code, demande ton jeton Saxo en masqué, vérifie la
 connexion, puis lance le backtest et affiche le verdict.
 
+Colab ne voit un dépôt privé que si son autorisation GitHub le couvre — ce
+qui est pénible à corriger depuis un téléphone. Deux contournements :
+
+- **Rendre le dépôt public.** L'historique a été audité : aucun `.env`, aucune
+  clé, aucun jeton n'y figure, et `.gitignore` couvre `.env` depuis le premier
+  commit. Le lien devient alors direct :
+  `colab.research.google.com/github/<user>/<repo>/blob/main/notebooks/backtest_saxo.ipynb`
+- **Utiliser `notebooks/cellule_autonome.py`**, qui ne dépend d'aucun accès
+  GitHub. Ce fichier est **généré** depuis les vrais modules par
+  `scripts/build_standalone.py` — à relancer après toute évolution du code,
+  jamais à modifier à la main, sinon la cellule mesurerait autre chose que le
+  bot réellement testé.
+
 ### Depuis un ordinateur
 
 ```bash
