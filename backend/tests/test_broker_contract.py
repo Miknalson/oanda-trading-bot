@@ -137,6 +137,46 @@ def test_no_broker_json_leaks_into_strategy_code():
     print(f"  {len(metier)} modules métier vérifiés, aucun format de courtier")
 
 
+
+def test_aucun_endpoint_saxo_deprecie():
+    """Saxo retire ses anciennes versions d'endpoints.
+
+    La V1 des graphiques renvoie un 404 — une page d'erreur HTML, pas une
+    réponse d'API. Le symptôme est déroutant : tout le reste fonctionne,
+    seul cet appel échoue, et le corps de la réponse ne ressemble à rien
+    d'exploitable.
+    """
+    source = (Path(__file__).resolve().parents[1] / "app" / "saxo_client.py").read_text()
+    code = "\n".join(
+        l for l in source.splitlines() if not l.strip().startswith("#")
+    )
+    assert "/chart/v1/" not in code, "la V1 des graphiques est dépréciée, utiliser /chart/v3/"
+    assert "/chart/v3/charts" in code, "endpoint des graphiques introuvable"
+    print("  graphiques en V3, aucune V1 dépréciée appelée")
+
+
+def test_les_erreurs_html_sont_lisibles():
+    """Un chemin inexistant renvoie une page HTML : elle doit être résumée."""
+    from app.saxo_client import SaxoClient
+
+    class FausseReponse:
+        def __init__(self, code, text):
+            self.status_code, self.text = code, text
+
+    html = '<!DOCTYPE html><html><title>404 - File or directory not found.</title>' + "x" * 900
+    message = SaxoClient._message_erreur(FausseReponse(404, html), "GET", "/chart/v1/charts")
+    assert "<html" not in message, "la page HTML est recrachée telle quelle"
+    assert len(message) < 500, f"message trop long ({len(message)} caractères)"
+    assert "n\'existe pas" in message
+
+    # Une vraie erreur d'API doit rester lisible intégralement.
+    json_err = SaxoClient._message_erreur(
+        FausseReponse(400, '{"Message":"Horizon invalide"}'), "GET", "/chart/v3/charts"
+    )
+    assert "Horizon invalide" in json_err, "le détail d'une erreur d'API a été perdu"
+    print("  page HTML résumée, message d'API conservé")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

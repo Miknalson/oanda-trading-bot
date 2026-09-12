@@ -93,8 +93,34 @@ class SaxoClient:
                 "remplace SAXO_ACCESS_TOKEN dans backend/.env."
             )
         if resp.status_code not in (200, 201, 202):
-            raise SaxoError(f"Saxo a renvoyé {resp.status_code}: {resp.text}")
+            raise SaxoError(self._message_erreur(resp, method, path))
         return resp.json() if resp.content else {}
+
+    @staticmethod
+    def _message_erreur(resp, method: str, path: str) -> str:
+        """Message lisible plutôt que le corps brut de la réponse.
+
+        Un chemin inexistant renvoie une page d'erreur HTML du serveur web,
+        pas une réponse d'API : quarante lignes de balises dans lesquelles
+        l'information utile — le chemin est faux — est noyée.
+        """
+        corps = resp.text or ""
+        est_html = corps.lstrip().lower().startswith(("<!doctype", "<html"))
+
+        if resp.status_code == 404 and est_html:
+            return (
+                f"404 sur {method} {path} : ce chemin n'existe pas côté Saxo. "
+                "L'authentification n'est pas en cause — le serveur a répondu "
+                "une page d'erreur web, pas une réponse d'API. Vérifie la "
+                "version de l'endpoint dans la documentation : Saxo retire "
+                "les anciennes (la V1 des graphiques a été remplacée par la V3)."
+            )
+        if est_html:
+            return (
+                f"{resp.status_code} sur {method} {path} : réponse HTML au lieu "
+                "de JSON, le chemin ou la passerelle est probablement en cause."
+            )
+        return f"Saxo a renvoyé {resp.status_code} sur {method} {path} : {corps[:400]}"
 
     async def _ensure_account(self) -> tuple[str, str]:
         """Résout les clés de compte, une seule fois."""
@@ -153,12 +179,14 @@ class SaxoClient:
             raise SaxoError(f"Intervalle non supporté : {granularity}")
 
         uic = await self._resolve_uic(instrument)
-        # Uic, AssetType et Horizon sont les seuls paramètres requis.
-        # `Mode` ne s'emploie qu'avec `Time` pour cadrer une fenêtre précise :
-        # l'envoyer seul n'apporte rien et peut être rejeté. Sans lui, l'API
-        # renvoie les bougies les plus récentes, ce qu'on veut.
+        # /chart/v3/charts : la V1 est dépréciée et renvoie 404 (une page
+        # d'erreur HTML, pas une réponse d'API — le chemin n'existe plus).
+        #
+        # Uic, AssetType et Horizon sont les paramètres requis. `Mode` ne
+        # s'emploie qu'avec `Time` pour cadrer une fenêtre précise : sans lui,
+        # l'API renvoie les bougies les plus récentes, ce qu'on veut.
         data = await self._request(
-            "GET", "/chart/v1/charts",
+            "GET", "/chart/v3/charts",
             params={
                 "Uic": uic,
                 "AssetType": "FxSpot",
