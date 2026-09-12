@@ -278,3 +278,166 @@ if __name__ == "__main__":
             print(f"  ❌ ÉCHEC: {exc}")
     print(f"\n{len(tests) - failed}/{len(tests)} tests passés")
     sys.exit(1 if failed else 0)
+
+
+def test_no_trade_names_its_cause_spread():
+    """« Aucun trade » doit dire POURQUOI, sinon on le lit à l'envers.
+
+    Un spread trop large et un marché sans tendance produisent la même ligne
+    vide, alors que ce sont deux conclusions opposées : « trop cher pour
+    entrer » contre « rien à jouer ».
+    """
+    result = run_backtest(random_walk(3000, seed=3), spread=0.05)
+    assert not result.closed
+    motif = result.no_trade_reason()
+    assert "spread" in motif and "trop cher" in motif, motif
+    assert result.skipped_spread_too_wide > 0
+    assert result.verdict == "AUCUN TRADE"
+    print(f"  {motif}")
+
+
+def test_no_trade_names_its_cause_insufficient_history():
+    result = run_backtest(random_walk(20), spread=0.00012)
+    assert result.insufficient_candles
+    motif = result.no_trade_reason()
+    assert "historique" in motif, motif
+    print(f"  {motif}")
+
+
+def test_skip_counts_add_up():
+    """Chaque bougie examinée sans position finit dans exactement un compteur."""
+    result = run_backtest(random_walk(2000, seed=11), spread=0.00012)
+    entrees = len(result.trades)
+    total = result.skipped_no_signal + result.skipped_spread_too_wide + entrees
+    assert total == result.bars_examined, (
+        f"{total} bougies classées pour {result.bars_examined} examinées"
+    )
+    print(
+        f"  {result.bars_examined} examinées = {entrees} entrées "
+        f"+ {result.skipped_no_signal} sans signal "
+        f"+ {result.skipped_spread_too_wide} spread trop large"
+    )
+
+
+def test_small_sample_is_not_a_verdict():
+    """Un petit échantillon sous le seuil ne doit PAS être déclaré perdant.
+
+    C'est le piège qui a failli nous faire abandonner la stratégie : 65 trades
+    à 33,8 % face à un seuil de 41 % semblent accablants, alors qu'un tirage
+    aussi mauvais arrive par malchance environ une fois sur sept.
+    """
+    from app.backtest import BacktestResult, BacktestTrade
+
+    r = BacktestResult(instrument="EUR_USD", granularity="H4", candles=1200,
+                       reward_ratio=1.5, risk_amount=2.5)
+    for i in range(65):
+        t = BacktestTrade("buy", i, 1.10, 1.09, 1.12, 1000.0)
+        t.won = i < 22
+        t.pl = 3.75 if t.won else -2.50
+        r.trades.append(t)
+
+    assert r.net_pl < 0, "ce cas doit bien être perdant en euros"
+    assert r.p_value > 0.05, f"p = {r.p_value:.1%}"
+    assert not r.is_conclusive
+    assert r.verdict == "NON CONCLUANT", r.verdict
+    besoin = r.trades_needed()
+    assert besoin and besoin > 65, besoin
+    print(
+        f"  65 trades à {r.win_rate:.1%} (seuil {r.breakeven_win_rate:.1%}) "
+        f"-> p = {r.p_value:.1%}, non concluant ; ~{besoin} trades suffiraient"
+    )
+
+
+def test_large_sample_does_conclude():
+    """Le même taux sur un gros échantillon, lui, tranche."""
+    from app.backtest import BacktestResult, BacktestTrade
+
+    r = BacktestResult(instrument="EUR_USD", granularity="H4", candles=99999,
+                       reward_ratio=1.5, risk_amount=2.5)
+    for i in range(650):
+        t = BacktestTrade("buy", i, 1.10, 1.09, 1.12, 1000.0)
+        t.won = i < 220
+        t.pl = 3.75 if t.won else -2.50
+        r.trades.append(t)
+
+    assert r.is_conclusive, f"p = {r.p_value:.1%}"
+    assert r.verdict == "PERDANT", r.verdict
+    print(f"  650 trades au même taux -> p = {r.p_value:.2%}, PERDANT")
+
+
+def test_binomial_matches_exact_coefficients():
+    """Le calcul en logarithmes doit égaler le calcul exact, et ne pas déborder.
+
+    `math.comb` renvoie un entier exact : au-delà de quelques centaines de
+    tirages il dépasse la capacité d'un flottant et le produit lève
+    OverflowError. C'est exactement ce qui s'est produit au premier jet.
+    """
+    import math
+
+    from app.backtest import binomial_tail_p
+
+    for n, k, p in [(65, 22, 0.40), (10, 3, 0.5), (200, 60, 0.41), (1, 0, 0.3)]:
+        exact = sum(math.comb(n, i) * p**i * (1 - p) ** (n - i) for i in range(k + 1))
+        assert abs(binomial_tail_p(n, k, p) - exact) < 1e-12, (n, k, p)
+
+    # Ne doit pas lever : c'est le cas que trades_needed() atteint.
+    assert 0.0 <= binomial_tail_p(4000, 1350, 0.41) <= 1.0
+
+    # Bornes. La somme complète vaut 1 à l'arrondi flottant près : exiger
+    # l'égalité stricte serait exiger que l'addition de 101 termes ne perde
+    # aucun bit.
+    assert abs(binomial_tail_p(100, 100, 0.5) - 1.0) < 1e-9
+    assert binomial_tail_p(0, 0, 0.5) == 1.0
+    print("  logarithmes == exact, et aucun débordement à 4000 tirages")
+
+
+def test_p_value_also_works_in_the_winning_direction():
+    """Le test de significativité doit couper des deux côtés.
+
+    Un calcul qui ne sait mesurer que la malchance déclarerait concluant
+    n'importe quel résultat positif, y compris une série chanceuse de dix
+    trades. La queue haute doit être testée avec la même exigence.
+    """
+    # Spread nul : cette hausse a une amplitude si faible qu'un spread de
+    # 1,2 pip y fait refuser TOUTES les entrées — exactement le phénomène
+    # observé sur H1 en réel. Ici on veut mesurer la queue haute, pas le
+    # filtre de spread.
+    gagnant = run_backtest(
+        steady_uptrend(3000), spread=0.0, financing_rate_annual=0.0
+    )
+    assert gagnant.closed
+    assert gagnant.win_rate > gagnant.breakeven_win_rate
+    assert gagnant.p_value < 0.05, f"p = {gagnant.p_value:.1%}"
+    assert gagnant.verdict == "RENTABLE", gagnant.verdict
+    assert gagnant.trades_needed() is None  # déjà tranché
+
+    print(
+        f"  hausse régulière : {len(gagnant.closed)} trades à "
+        f"{gagnant.win_rate:.1%} -> p = {gagnant.p_value:.2%}, RENTABLE"
+    )
+
+
+def test_backtest_spread_ceiling_matches_production():
+    """Le plafond du backtest doit égaler celui du serveur.
+
+    S'ils divergent, le backtest mesure une stratégie que le bot ne tradera
+    pas — et c'est le genre d'écart qui ne se voit dans aucun chiffre.
+    """
+    import os
+
+    from app.backtest import MAX_SPREAD_RATIO
+    from app.config import get_settings
+
+    ancien = os.environ.pop("MAX_SPREAD_RATIO", None)
+    get_settings.cache_clear()
+    try:
+        production = get_settings().max_spread_ratio
+    finally:
+        if ancien is not None:
+            os.environ["MAX_SPREAD_RATIO"] = ancien
+        get_settings.cache_clear()
+
+    assert MAX_SPREAD_RATIO == production, (
+        f"backtest {MAX_SPREAD_RATIO} != production {production}"
+    )
+    print(f"  plafond de spread aligné : {MAX_SPREAD_RATIO:.0%} des deux côtés")

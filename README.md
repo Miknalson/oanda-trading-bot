@@ -257,6 +257,33 @@ perte (on ne sait pas lequel est arrivé en premier) ; le spread dégrade
 toujours réussite et P/L ; le P/L est cohérent avec le taux de réussite
 mesuré ; un spread ruineux n'ouvre aucun trade.
 
+### Deux phrases qu'un backtest ne doit jamais dire
+
+**« Aucun trade sur la période. »** Ça ressemble à un marché calme, et c'est
+presque toujours l'inverse : un spread trop large pour qu'une entrée soit
+rentable. Trois causes produisent la même ligne vide et appellent trois
+décisions opposées — pas assez d'historique, aucune tendance détectée, toutes
+les entrées refusées pour cause de spread. Le résultat compte donc les
+bougies écartées et leur motif (`no_trade_reason()`), et la ligne vide n'est
+plus muette :
+
+> H1 — aucun trade : sur 1148 bougies examinées : 1148 entrées refusées car
+> le spread (0.00025) dépassait 15% de la distance du stop — le marché
+> n'était pas calme, il était trop cher
+
+Le mécanisme est mesurable : l'ATR sur H1 vaut environ le quart de celui sur
+H4, donc le stop est quatre fois plus proche, donc le même spread en ronge
+quatre fois plus. H1 n'est pas « sans signal », il est **trop cher pour le
+spread de ce courtier**.
+
+**« Perdant. »** sur un petit échantillon. Un taux de réussite sous le seuil
+d'équilibre peut très bien n'être que de la malchance. Le résultat calcule
+donc la probabilité exacte d'un tel tirage si la stratégie était pile à
+l'équilibre (`p_value`, loi binomiale calculée en logarithmes — `math.comb`
+déborde du flottant au-delà de quelques centaines de tirages) et refuse de
+trancher au-dessus de 5 % : le verdict devient **NON CONCLUANT**, avec le
+nombre de trades qu'il faudrait (`trades_needed()`).
+
 ### Ce que disent les premiers résultats
 
 Sur données synthétiques couvrant l'éventail des comportements de marché
@@ -274,9 +301,25 @@ La stratégie n'atteint l'équilibre qu'avec une persistance de tendance
 extrême. Les marchés de change réels s'en approchent rarement sur les
 intervalles courts.
 
-**Ces chiffres viennent de données simulées, pas du marché.** Le verdict
-réel demande l'historique OANDA, donc une clé API. La commande ci-dessus le
-produira.
+**Ces chiffres viennent de données simulées, pas du marché.**
+
+### Le premier passage sur données réelles (Saxo, EUR/USD, 1200 bougies)
+
+| Intervalle | Trades | Réussite | Seuil | P/L | Malchance | Verdict |
+|---|---|---|---|---|---|---|
+| H1 | — | — | — | — | — | AUCUN TRADE (spread > 15 % du stop) |
+| H4 | 65 | 33,8 % | 41,0 % | −29,18 | 14,7 % | NON CONCLUANT |
+
+Lecture honnête : **ce passage ne condamne pas la stratégie et ne la sauve
+pas.** 65 trades à 7 points sous le seuil, c'est un tirage qui arriverait par
+pure malchance environ une fois sur sept — il en faudrait environ **170** au
+même taux pour conclure. Et H1 n'a rien mesuré du tout : le spread du compte
+de simulation Saxo y refusait chaque entrée.
+
+Ce que ça dit vraiment, et qui compte : **1200 bougies ne suffisent pas.**
+C'est la limite d'une requête chez Saxo, et la prochaine étape utile n'est
+pas de changer la stratégie mais d'aller chercher plus d'historique
+(pagination par date dans les clients) ou d'autres instruments.
 
 ## Notifications : paliers 25 / 50 / 75 / 100 %
 

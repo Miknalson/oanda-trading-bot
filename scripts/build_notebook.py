@@ -163,29 +163,62 @@ for g in INTERVALLES:
 
 md("""## 5. Le verdict
 
-Une lecture directe, sans enrobage.
+Une lecture directe, sans enrobage — mais **prudente sur deux points** qui
+font dire n'importe quoi à un backtest :
+
+1. *Aucun trade* n'est pas un résultat. Le carnet dit toujours pourquoi :
+   pas assez d'historique, aucune tendance, ou — le cas le plus fréquent —
+   un spread trop large pour qu'une entrée soit rentable. « Trop cher pour
+   entrer » et « marché calme » se ressemblent et signifient l'inverse.
+2. *Perdant sur 65 trades* n'est pas un verdict. Un taux de réussite 7 points
+   sous le seuil d'équilibre arrive par simple malchance à peu près une fois
+   sur sept. Tant que ce n'est pas tranché, le carnet affiche
+   **NON CONCLUANT** et dit combien de trades il faudrait.
 """),
-code("""print(f"{'Intervalle':<12}{'Trades':>8}{'Réussite':>11}{'Seuil':>9}{'P/L':>11}  Verdict")
-print("-" * 62)
+code("""print(f"{'Intervalle':<12}{'Trades':>8}{'Réussite':>11}{'Seuil':>9}{'P/L':>11}{'Malchance':>11}  Verdict")
+print("-" * 74)
 for r in resultats:
     if not r.closed:
-        print(f"{r.granularity:<12}{'aucun trade sur la période':>48}")
+        print(f"{r.granularity:<12}{'—':>8}{'—':>11}{'—':>9}{'—':>11}{'—':>11}  AUCUN TRADE")
         continue
-    verdict = "RENTABLE" if r.expectancy > 0 else "PERDANT"
     print(f"{r.granularity:<12}{len(r.closed):>8}{r.win_rate:>10.1%}"
-          f"{r.breakeven_win_rate:>9.1%}{r.net_pl:>+11.2f}  {verdict}")
+          f"{r.breakeven_win_rate:>9.1%}{r.net_pl:>+11.2f}{r.p_value:>10.1%}  {r.verdict}")
+
+# Une ligne vide n'est pas une information : dire pourquoi.
+for r in resultats:
+    if not r.closed:
+        print(f"\\n{r.granularity} — aucun trade : {r.no_trade_reason()}")
 
 print()
-gagnants = [r for r in resultats if r.closed and r.expectancy > 0]
+concluants = [r for r in resultats if r.is_conclusive]
+gagnants = [r for r in concluants if r.expectancy > 0]
+perdants = [r for r in concluants if r.expectancy <= 0]
+indecis = [r for r in resultats if r.closed and not r.is_conclusive]
+
 if gagnants:
-    print("Au moins un réglage est rentable sur cette période.")
-    print("⚠️ Une période favorable ne prouve rien : teste sur plusieurs")
-    print("   instruments et plusieurs années avant d'en conclure quoi que ce soit.")
-else:
-    print("Aucun réglage n'est rentable sur cette période.")
+    noms = ", ".join(r.granularity for r in gagnants)
+    print(f"Rentable de façon statistiquement nette : {noms}.")
+    print("⚠️ Une période favorable ne prouve pas une stratégie : teste sur")
+    print("   plusieurs instruments et plusieurs années avant d'y mettre un euro.")
+
+if perdants:
+    noms = ", ".join(r.granularity for r in perdants)
+    print(f"Perdant de façon statistiquement nette : {noms}.")
     print("C'est une réponse utile : tu l'as obtenue sans risquer un centime.")
-    print("La suite consisterait à tester d'autres stratégies — le backtester")
-    print("accepte n'importe quelle logique de signal.")"""),
+
+if indecis:
+    print("Indécis — l'échantillon ne permet pas de conclure :")
+    for r in indecis:
+        besoin = r.trades_needed()
+        combien = f"il en faudrait ~{besoin}" if besoin else "bien davantage"
+        print(f"  {r.granularity} : {len(r.closed)} trades seulement, {combien}.")
+    print("Ne conclus rien de ces lignes, ni en bien ni en mal. Pour trancher il")
+    print("faut plus d'historique (pagination par date, voir fetch_history) ou")
+    print("plusieurs instruments.")
+
+if not concluants and not indecis:
+    print("Aucun trade nulle part — regarde les motifs ci-dessus avant de")
+    print("changer quoi que ce soit à la stratégie.")"""),
 ]
 
 nb = {

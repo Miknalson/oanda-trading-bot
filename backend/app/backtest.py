@@ -33,12 +33,25 @@ intérêts sur toute position gardée après 17h à New York. Contrairement au
 spread, il se déduit bien du résultat, et il grandit avec la durée de
 détention — donc il pèse d'autant plus que l'intervalle est long. Sur H4, un
 trade traverse souvent plusieurs nuits.
+
+Deux pièges de lecture, que ce module refuse de laisser passer :
+
+- **« aucun trade » n'est pas une information.** Ça peut vouloir dire « pas
+  assez d'historique », « aucune tendance détectée » ou « chaque entrée
+  refusée car le spread était trop large » — trois conclusions opposées. Le
+  résultat compte donc les bougies écartées et leur motif (`no_trade_reason`).
+- **un petit échantillon ne tranche rien.** Avec 65 trades, un taux de
+  réussite 7 points sous le seuil d'équilibre arrive par simple malchance à
+  peu près une fois sur sept. Le résultat calcule donc la probabilité de ce
+  tirage (`p_value`) et refuse de dire « perdant » quand elle est élevée
+  (`verdict` = NON CONCLUANT).
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import logging
+import math
 from dataclasses import dataclass, field
 
 from .analysis import ATR_STOP_MULTIPLIER
@@ -48,11 +61,60 @@ from .indicators import atr, trend_direction
 # Périodes des indicateurs — doivent rester alignées sur indicators.py.
 FAST_PERIOD, SLOW_PERIOD, ATR_PERIOD = 20, 50, 14
 
+# Plafond du spread, en fraction de la distance du stop : au-delà le trade est
+# refusé. Doit rester aligné sur MAX_SPREAD_RATIO dans config.py, sinon le
+# backtest ne mesure pas la stratégie qui tradera réellement.
+MAX_SPREAD_RATIO = 0.15
+
+# Bougies nécessaires avant le premier signal possible (amorçage des
+# indicateurs). Exposé pour que « pas assez d'historique » puisse se chiffrer.
+WARMUP = max(SLOW_PERIOD, ATR_PERIOD) + 1
+
+# Seuil de significativité : au-dessus, on ne conclut pas.
+SIGNIFICANCE = 0.05
+
 # Durée d'une bougie en heures, pour estimer le nombre de nuits traversées.
 GRANULARITY_HOURS = {
     "M1": 1 / 60, "M5": 5 / 60, "M15": 0.25, "M30": 0.5,
     "H1": 1.0, "H4": 4.0, "D": 24.0,
 }
+
+
+def binomial_tail_p(n: int, k: int, p: float) -> float:
+    """P(X <= k) pour X ~ Binomiale(n, p), sans dépendance externe.
+
+    Sert à répondre à la seule question qui permette de conclure d'un
+    backtest : « ce résultat pourrait-il être de la malchance ? ». Un verdict
+    rendu sans elle est un verdict rendu sur du bruit.
+
+    Le calcul passe par les logarithmes et non par `math.comb`, qui renvoie
+    un entier exact : à quelques milliers de trades ce coefficient dépasse
+    largement la capacité d'un flottant et le calcul direct lève
+    OverflowError. En logarithmes, les termes négligeables s'annulent
+    proprement au lieu de déborder.
+    """
+    if n <= 0:
+        return 1.0
+    p = min(max(p, 0.0), 1.0)
+    k = min(max(k, 0), n)
+    if p <= 0.0:
+        return 1.0  # X vaut toujours 0, donc X <= k est certain
+    if p >= 1.0:
+        return 1.0 if k >= n else 0.0
+
+    log_p, log_q = math.log(p), math.log1p(-p)
+    log_n_fact = math.lgamma(n + 1)
+    total = 0.0
+    for i in range(k + 1):
+        log_terme = (
+            log_n_fact
+            - math.lgamma(i + 1)
+            - math.lgamma(n - i + 1)
+            + i * log_p
+            + (n - i) * log_q
+        )
+        total += math.exp(log_terme)
+    return min(total, 1.0)
 
 
 @dataclass
@@ -83,6 +145,15 @@ class BacktestResult:
     reward_ratio: float = 1.5
     risk_amount: float = 0.0
     financing_rate_annual: float = 0.0
+    max_spread_ratio: float = MAX_SPREAD_RATIO
+
+    # Pourquoi des bougies n'ont pas donné de trade. Sans ce décompte,
+    # « aucun trade » se lit comme « marché calme » alors que la cause est
+    # souvent l'inverse exactement : un marché trop cher pour y entrer.
+    bars_examined: int = 0
+    skipped_no_signal: int = 0
+    skipped_spread_too_wide: int = 0
+    insufficient_candles: bool = False
 
     @property
     def closed(self) -> list[BacktestTrade]:
@@ -142,25 +213,130 @@ class BacktestResult:
             worst = min(worst, equity - peak)
         return worst
 
+    def no_trade_reason(self) -> str:
+        """Pourquoi aucun trade n'a été ouvert — jamais « on ne sait pas ».
+
+        « Aucun trade » sans motif est la sortie la plus trompeuse d'un
+        backtest : elle ressemble à un marché calme, alors qu'un spread trop
+        large (marché trop cher) produit exactement la même ligne vide.
+        """
+        if self.insufficient_candles:
+            return (
+                f"pas assez d'historique — {self.candles} bougies reçues, il en "
+                f"faut plus de {WARMUP + 1} pour amorcer les indicateurs "
+                f"(SMA {SLOW_PERIOD}, ATR {ATR_PERIOD})"
+            )
+        if self.bars_examined == 0:
+            return "aucune bougie examinée"
+
+        motifs = []
+        if self.skipped_spread_too_wide:
+            motifs.append(
+                f"{self.skipped_spread_too_wide} entrées refusées car le spread "
+                f"({self.spread:.5f}) dépassait {self.max_spread_ratio:.0%} de la "
+                f"distance du stop — le marché n'était pas calme, il était trop cher"
+            )
+        if self.skipped_no_signal:
+            motifs.append(
+                f"{self.skipped_no_signal} bougies sans signal de tendance"
+            )
+        if not motifs:
+            return f"{self.bars_examined} bougies examinées, cause indéterminée"
+        return f"sur {self.bars_examined} bougies examinées : " + " ; ".join(motifs)
+
+    @property
+    def p_value(self) -> float:
+        """Probabilité d'obtenir un taux de réussite au moins aussi extrême
+        que celui mesuré, si la stratégie était en réalité exactement à
+        l'équilibre.
+
+        Test unilatéral, dans le sens du résultat observé. Au-dessus de 5 %,
+        l'échantillon ne permet pas de conclure : ce tirage-là arriverait par
+        pure malchance (ou pure chance) assez souvent pour qu'on n'en tire
+        rien.
+        """
+        n = len(self.closed)
+        if n == 0:
+            return 1.0
+        seuil = self.breakeven_win_rate
+        if self.wins <= n * seuil:
+            return binomial_tail_p(n, self.wins, seuil)
+        return 1.0 - binomial_tail_p(n, self.wins - 1, seuil)
+
+    @property
+    def is_conclusive(self) -> bool:
+        """L'échantillon suffit-il à trancher ?"""
+        return bool(self.closed) and self.p_value < SIGNIFICANCE
+
+    @property
+    def verdict(self) -> str:
+        if not self.closed:
+            return "AUCUN TRADE"
+        if not self.is_conclusive:
+            return "NON CONCLUANT"
+        return "RENTABLE" if self.expectancy > 0 else "PERDANT"
+
+    def trades_needed(self, *, maximum: int = 4000) -> int | None:
+        """Combien de trades faudrait-il, au taux observé, pour conclure ?
+
+        Estimation : on suppose le taux de réussite stable et on cherche par
+        dichotomie le plus petit échantillon qui passerait sous les 5 %.
+        Renvoie None si le résultat est déjà concluant, s'il penche du bon
+        côté du seuil, ou si même `maximum` trades ne suffiraient pas.
+        """
+        n0 = len(self.closed)
+        if n0 == 0 or self.is_conclusive:
+            return None
+        taux, seuil = self.win_rate, self.breakeven_win_rate
+        if taux >= seuil:
+            return None  # rien à prouver du côté perdant
+
+        def concluant(n: int) -> bool:
+            return binomial_tail_p(n, round(taux * n), seuil) < SIGNIFICANCE
+
+        if not concluant(maximum):
+            return None
+        bas, haut = n0, maximum
+        while bas < haut:
+            milieu = (bas + haut) // 2
+            if concluant(milieu):
+                haut = milieu
+            else:
+                bas = milieu + 1
+        return bas
+
     def summary(self) -> str:
         n = len(self.closed)
         if n == 0:
-            return f"{self.instrument} {self.granularity}: aucun trade sur la période."
-        verdict = "RENTABLE" if self.expectancy > 0 else "PERDANT"
-        return (
-            f"{self.instrument} {self.granularity} — {self.candles} bougies\n"
-            f"  trades          : {n}\n"
+            return (
+                f"{self.instrument} {self.granularity} — {self.candles} bougies\n"
+                f"  aucun trade : {self.no_trade_reason()}"
+            )
+        lignes = [
+            f"{self.instrument} {self.granularity} — {self.candles} bougies",
+            f"  trades          : {n}",
             f"  taux de réussite: {self.win_rate:.1%}  "
-            f"(seuil d'équilibre {self.breakeven_win_rate:.1%})\n"
-            f"  P/L net         : {self.net_pl:+.2f}\n"
+            f"(seuil d'équilibre {self.breakeven_win_rate:.1%})",
+            f"  P/L net         : {self.net_pl:+.2f}",
             f"  coût du spread  : {self.total_spread_cost:.2f} "
-            f"(payé en pertes plus fréquentes)\n"
+            f"(payé en pertes plus fréquentes)",
             f"  financement     : {self.total_financing:+.2f} "
-            f"(déduit du résultat)\n"
-            f"  par trade       : {self.expectancy:+.3f}\n"
-            f"  pire recul      : {self.max_drawdown:.2f}\n"
-            f"  verdict         : {verdict}"
-        )
+            f"(déduit du résultat)",
+            f"  par trade       : {self.expectancy:+.3f}",
+            f"  pire recul      : {self.max_drawdown:.2f}",
+            f"  malchance ?     : {self.p_value:.1%} de probabilité d'un tel "
+            f"résultat à l'équilibre",
+            f"  verdict         : {self.verdict}",
+        ]
+        if not self.is_conclusive:
+            besoin = self.trades_needed()
+            if besoin:
+                lignes.append(
+                    f"  il faudrait ~{besoin} trades au même taux pour trancher"
+                )
+            else:
+                lignes.append("  échantillon trop petit pour trancher")
+        return "\n".join(lignes)
 
 
 def run_backtest(
@@ -172,6 +348,7 @@ def run_backtest(
     reward_ratio: float = 1.5,
     risk_amount: float = 2.50,
     financing_rate_annual: float = 0.02,
+    max_spread_ratio: float = MAX_SPREAD_RATIO,
 ) -> BacktestResult:
     """Rejoue la stratégie bougie par bougie, sans regard vers le futur.
 
@@ -187,17 +364,18 @@ def run_backtest(
         reward_ratio=reward_ratio,
         risk_amount=risk_amount,
         financing_rate_annual=financing_rate_annual,
+        max_spread_ratio=max_spread_ratio,
     )
 
     bar_hours = GRANULARITY_HOURS.get(granularity, 1.0)
 
-    warmup = max(SLOW_PERIOD, ATR_PERIOD) + 1
-    if len(candles) <= warmup + 1:
+    if len(candles) <= WARMUP + 1:
+        result.insufficient_candles = True
         return result
 
     open_trade: BacktestTrade | None = None
 
-    for i in range(warmup, len(candles) - 1):
+    for i in range(WARMUP, len(candles) - 1):
         # --- Position ouverte : le stop ou l'objectif est-il touché ? ---
         if open_trade is not None:
             bar = candles[i]
@@ -240,15 +418,18 @@ def run_backtest(
             continue
 
         # --- Pas de position : chercher un signal sur le passé seulement ---
+        result.bars_examined += 1
         history = candles[: i + 1]
         closes = [c.close for c in history]
         direction = trend_direction(closes, FAST_PERIOD, SLOW_PERIOD)
         atr_value = atr(history, ATR_PERIOD)
         if direction is None or not atr_value or atr_value <= 0:
+            result.skipped_no_signal += 1
             continue
 
         stop_distance = atr_value * ATR_STOP_MULTIPLIER
-        if spread / stop_distance > 0.15:  # même refus qu'en production
+        if spread / stop_distance > max_spread_ratio:  # même refus qu'en production
+            result.skipped_spread_too_wide += 1
             continue
 
         # Entrée à l'ouverture de la bougie SUIVANTE (prix médian).
