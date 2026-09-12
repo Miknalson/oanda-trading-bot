@@ -153,16 +153,22 @@ class SaxoClient:
             raise SaxoError(f"Intervalle non supporté : {granularity}")
 
         uic = await self._resolve_uic(instrument)
+        # Uic, AssetType et Horizon sont les seuls paramètres requis.
+        # `Mode` ne s'emploie qu'avec `Time` pour cadrer une fenêtre précise :
+        # l'envoyer seul n'apporte rien et peut être rejeté. Sans lui, l'API
+        # renvoie les bougies les plus récentes, ce qu'on veut.
         data = await self._request(
             "GET", "/chart/v1/charts",
             params={
-                "Uic": uic, "AssetType": "FxSpot", "Horizon": minutes,
+                "Uic": uic,
+                "AssetType": "FxSpot",
+                "Horizon": minutes,
                 "Count": min(count, 1200),  # plafond de l'API
-                "Mode": "UpTo",
             },
         )
+        brutes = data.get("Data", [])
         candles = []
-        for c in data.get("Data", []):
+        for c in brutes:
             # Saxo renvoie OpenBid/OpenAsk sur certains comptes et Open sur
             # d'autres : on prend le médian quand les deux côtés existent.
             if "OpenBid" in c and "OpenAsk" in c:
@@ -178,6 +184,16 @@ class SaxoClient:
                 candles.append(
                     Candle(open=c["Open"], high=c["High"], low=c["Low"], close=c["Close"])
                 )
+
+        # Des bougies reçues mais aucune comprise : le format a changé, ou il
+        # diffère selon le compte. Se taire ici donnerait « aucun trade » sans
+        # la moindre piste — on dit plutôt ce qu'on a réellement reçu.
+        if brutes and not candles:
+            raise SaxoError(
+                f"{len(brutes)} bougies reçues pour {instrument} mais aucune "
+                f"exploitable : champs inattendus {sorted(brutes[0].keys())}. "
+                "Le format de réponse de Saxo diffère de celui attendu."
+            )
         return candles
 
     async def get_quote(self, instrument: str) -> Quote:
