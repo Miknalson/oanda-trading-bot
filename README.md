@@ -191,10 +191,25 @@ isoler l'effet du seul spread).
 
 ## Backtest : mesurer au lieu de supposer
 
+### Depuis un téléphone, sans rien installer
+
+Ouvre `notebooks/backtest_saxo.ipynb` dans [Google Colab](https://colab.research.google.com/).
+Le carnet récupère le code, demande ton jeton Saxo en masqué, vérifie la
+connexion, puis lance le backtest et affiche le verdict.
+
+### Depuis un ordinateur
+
 ```bash
 cd backend
-.venv/bin/python -m app.backtest --instrument EUR_USD --granularity H1 --count 5000
+.venv/bin/python -m app.backtest --instrument EUR_USD --granularity H1 --count 1200
 ```
+
+⚠️ `fetch_history` ne fait **qu'une seule requête**. Les clients n'exposent
+pas encore de pagination par date : boucler renverrait la même fenêtre, et
+empiler ces réponses fabriquerait un historique fait de doublons — un
+backtest qui tourne sans rien mesurer. Le plafond est donc celui du courtier
+(1200 bougies chez Saxo, 5000 chez OANDA). Remonter plus loin demandera
+d'ajouter une pagination par date dans chaque client.
 
 Le backtest rejoue la stratégie sur l'historique OANDA et mesure le taux de
 réussite **réel**, frais compris. Il réutilise les fonctions de

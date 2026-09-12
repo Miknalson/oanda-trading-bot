@@ -232,6 +232,39 @@ def test_financing_is_zero_when_rate_is_zero():
     print("  taux nul -> aucun coût de détention, comme attendu")
 
 
+
+def test_fetch_history_never_duplicates():
+    """Une seule requête : jamais d'historique fabriqué par répétition.
+
+    Les clients ne savent pas encore demander « plus ancien que telle date ».
+    Boucler renverrait la même fenêtre ; empiler ces réponses produirait un
+    backtest qui tourne sans rien mesurer.
+    """
+    import asyncio
+    from app.backtest import fetch_history
+
+    class ClientQuiRepete:
+        """Renvoie toujours la même fenêtre, comme un vrai courtier sans pagination."""
+
+        def __init__(self, taille_max=1200):
+            self.taille_max = taille_max
+            self.appels = 0
+
+        async def get_candles(self, instrument, granularity, count):
+            self.appels += 1
+            n = min(count, self.taille_max)
+            return [candle(1.0 + i, 1.0 + i, 1.0 + i, 1.0 + i) for i in range(n)]
+
+    client = ClientQuiRepete()
+    bougies = asyncio.run(fetch_history(client, "EUR_USD", "H1", 5000))
+
+    assert client.appels == 1, f"{client.appels} requêtes au lieu d'une seule"
+    assert len(bougies) == 1200, len(bougies)
+    closes = [b.close for b in bougies]
+    assert len(closes) == len(set(closes)), "des bougies dupliquées se sont glissées dedans"
+    print(f"  {len(bougies)} bougies uniques en 1 requête, aucun doublon")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

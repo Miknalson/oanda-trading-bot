@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 from dataclasses import dataclass, field
 
 from .analysis import ATR_STOP_MULTIPLIER
@@ -282,19 +283,24 @@ def run_backtest(
 async def fetch_history(
     client, instrument: str, granularity: str, count: int
 ) -> list[Candle]:
-    """Récupère `count` bougies en paginant (les courtiers plafonnent chaque
-    requête : 5000 chez OANDA, 1200 chez Saxo)."""
-    candles: list[Candle] = []
-    remaining = count
-    while remaining > 0:
-        batch = min(remaining, 5000)
-        chunk = await client.get_candles(instrument, granularity, batch)
-        if not chunk:
-            break
-        candles = chunk + candles
-        remaining -= len(chunk)
-        if len(chunk) < batch:
-            break
+    """Récupère jusqu'à `count` bougies, les plus récentes.
+
+    Une seule requête, volontairement. Les clients n'exposent pas encore de
+    paramètre « antérieur à telle date » : redemander en boucle renverrait
+    exactement la même fenêtre, et empiler ces réponses fabriquerait un
+    historique fait de doublons. Un backtest sur des données dupliquées a
+    l'air de fonctionner tout en ne mesurant rien — mieux vaut un historique
+    court et vrai.
+
+    Pour remonter plus loin, il faudra une pagination par date dans chaque
+    client, puis lever la limite ici.
+    """
+    candles = await client.get_candles(instrument, granularity, count)
+    if len(candles) < count:
+        logging.getLogger(__name__).info(
+            "%s %s : %d bougies obtenues sur %d demandées (plafond du courtier).",
+            instrument, granularity, len(candles), count,
+        )
     return candles
 
 
