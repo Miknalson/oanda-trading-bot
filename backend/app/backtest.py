@@ -55,7 +55,7 @@ import math
 from dataclasses import dataclass, field
 
 from .analysis import ATR_STOP_MULTIPLIER
-from .broker import Candle
+from .broker import BrokerError, Candle
 from .indicators import atr, trend_direction
 
 # Périodes des indicateurs — doivent rester alignées sur indicators.py.
@@ -69,6 +69,11 @@ MAX_SPREAD_RATIO = 0.15
 # Bougies nécessaires avant le premier signal possible (amorçage des
 # indicateurs). Exposé pour que « pas assez d'historique » puisse se chiffrer.
 WARMUP = max(SLOW_PERIOD, ATR_PERIOD) + 1
+
+# Bougies que les indicateurs regardent réellement : la SMA lente en veut
+# SLOW_PERIOD, l'ATR en veut ATR_PERIOD + 1 (il lui faut la clôture
+# précédente). Au-delà, rien ne change au calcul.
+INDICATOR_WINDOW = max(SLOW_PERIOD, ATR_PERIOD + 1)
 
 # Seuil de significativité : au-dessus, on ne conclut pas.
 SIGNIFICANCE = 0.05
@@ -419,10 +424,22 @@ def run_backtest(
 
         # --- Pas de position : chercher un signal sur le passé seulement ---
         result.bars_examined += 1
-        history = candles[: i + 1]
-        closes = [c.close for c in history]
+
+        # Fenêtre glissante, et non tout l'historique. Les indicateurs ne
+        # regardent que leurs dernières bougies (SMA 50, ATR 14) : leur passer
+        # l'historique entier à chaque barre donnait exactement le même
+        # résultat en temps quadratique — 6000 bougies valaient 36 millions
+        # d'opérations par réglage testé, et la pagination venait justement de
+        # faire passer l'historique de 1200 à plusieurs milliers.
+        # `max(0, ...)` n'est pas décoratif : un indice de départ négatif
+        # découperait la fin du tableau, c'est-à-dire des bougies FUTURES.
+        # Le regard vers le futur est l'erreur qui rend un backtest
+        # flatteur et faux, et elle se glisserait ici sans rien casser.
+        debut = max(0, i + 1 - INDICATOR_WINDOW)
+        fenetre = candles[debut : i + 1]
+        closes = [c.close for c in fenetre]
         direction = trend_direction(closes, FAST_PERIOD, SLOW_PERIOD)
-        atr_value = atr(history, ATR_PERIOD)
+        atr_value = atr(fenetre, ATR_PERIOD)
         if direction is None or not atr_value or atr_value <= 0:
             result.skipped_no_signal += 1
             continue
@@ -464,25 +481,85 @@ def run_backtest(
 async def fetch_history(
     client, instrument: str, granularity: str, count: int
 ) -> list[Candle]:
-    """Récupère jusqu'à `count` bougies, les plus récentes.
+    """Remonte jusqu'à `count` bougies, les plus récentes d'abord.
 
-    Une seule requête, volontairement. Les clients n'exposent pas encore de
-    paramètre « antérieur à telle date » : redemander en boucle renverrait
-    exactement la même fenêtre, et empiler ces réponses fabriquerait un
-    historique fait de doublons. Un backtest sur des données dupliquées a
-    l'air de fonctionner tout en ne mesurant rien — mieux vaut un historique
-    court et vrai.
+    Les courtiers plafonnent chaque requête (1200 points chez Saxo, 5000 chez
+    OANDA). Pour aller au-delà, on remonte par pages : on demande d'abord la
+    fenêtre la plus récente, puis « ce qui précède la plus ancienne bougie
+    reçue », et ainsi de suite.
 
-    Pour remonter plus loin, il faudra une pagination par date dans chaque
-    client, puis lever la limite ici.
+    Le danger de cette boucle est précis. Si le courtier **ignore** le
+    paramètre de bornage, il renvoie à chaque tour exactement la même fenêtre.
+    Empiler ces réponses fabriquerait un historique fait de doublons : un
+    backtest dessus a l'air de fonctionner tout en ne mesurant rien, et c'est
+    invisible dans les chiffres qu'il sort. La boucle vérifie donc à chaque
+    page que le courtier a réellement reculé, et s'arrête en erreur sinon —
+    plutôt qu'un historique court mais vrai devenu long et faux.
+
+    Sans horodatage sur les bougies, il n'y a rien à quoi se borner : on
+    renvoie alors la seule première page, en le disant.
     """
-    candles = await client.get_candles(instrument, granularity, count)
-    if len(candles) < count:
-        logging.getLogger(__name__).info(
-            "%s %s : %d bougies obtenues sur %d demandées (plafond du courtier).",
-            instrument, granularity, len(candles), count,
+    log = logging.getLogger(__name__)
+    taille = min(getattr(client, "max_candles_per_request", 500) or 500, count)
+    taille = max(taille, 1)
+
+    page = await client.get_candles(instrument, granularity, taille)
+    if not page:
+        return []
+
+    if not all(c.time for c in page):
+        log.info(
+            "%s %s : le courtier n'horodate pas ses bougies — pagination "
+            "impossible, %d bougies au total.",
+            instrument, granularity, len(page),
         )
-    return candles
+        return page
+
+    connues: dict[str, Candle] = {c.time: c for c in page}
+    # Garde-fou contre une boucle sans fin si un courtier se comporte de façon
+    # inattendue : il ne faut jamais plus d'une page par tranche de `taille`.
+    pages_max = count // taille + 2
+
+    for _ in range(pages_max):
+        if len(connues) >= count:
+            break
+
+        plus_recente_avant = page[-1].time
+        plus_ancienne = min(connues)
+        page = await client.get_candles(
+            instrument, granularity, taille, before=plus_ancienne
+        )
+        if not page:
+            break  # historique épuisé : c'est une fin normale
+
+        # Si la bougie la PLUS RÉCENTE de la nouvelle page est celle de la
+        # précédente, le courtier n'a pas reculé d'un pouce : le bornage a été
+        # ignoré. Ce test ne peut pas se déclencher à tort sur un historique
+        # épuisé — dans ce cas la fenêtre renvoyée serait plus ancienne, pas
+        # identique.
+        if page[-1].time == plus_recente_avant:
+            raise BrokerError(
+                f"{instrument} {granularity} : le courtier a renvoyé la même "
+                f"fenêtre (jusqu'à {page[-1].time}) alors qu'on demandait ce "
+                f"qui précède {plus_ancienne}. Le bornage par date n'est pas "
+                f"pris en compte. Arrêt : empiler ces réponses fabriquerait un "
+                f"historique en doublons, sur lequel un backtest paraît "
+                f"fonctionner tout en ne mesurant rien."
+            )
+
+        nouvelles = {c.time: c for c in page if c.time and c.time < plus_ancienne}
+        if not nouvelles:
+            break  # plus rien d'antérieur : début de l'historique disponible
+        connues.update(nouvelles)
+
+    ordonnees = [connues[t] for t in sorted(connues)]
+    if len(ordonnees) < count:
+        log.info(
+            "%s %s : %d bougies obtenues sur %d demandées (début de "
+            "l'historique disponible).",
+            instrument, granularity, len(ordonnees), count,
+        )
+    return ordonnees[-count:]
 
 
 async def _main() -> None:

@@ -235,34 +235,61 @@ def test_le_spread_marche_ferme_n_est_jamais_utilise():
 
 
 def _courtier_factice(marche_ouvert: bool):
-    """Courtier minimal : assez pour exécuter les cellules pour de vrai."""
+    """Courtier minimal : assez pour exécuter les cellules pour de vrai.
+
+    Il date ses bougies et honore le bornage par date, comme un vrai : sinon
+    le carnet emprunterait la voie « pagination impossible » et le test ne
+    vérifierait jamais le chemin réellement emprunté en production.
+    """
     import random
+    from datetime import datetime, timedelta, timezone
 
     sys.path.insert(0, str(RACINE / "backend"))
     from app.broker import Candle, Quote
 
     class Factice:
-        async def get_quote(self, instrument):
-            # Marché fermé : spread élargi, comme chez un vrai courtier.
-            spread = 0.00052 if not marche_ouvert else 0.00011
-            return Quote(bid=1.10, ask=1.10 + spread, tradeable=marche_ouvert)
+        # Même plafond que Saxo : le carnet doit donc paginer.
+        max_candles_per_request = 1200
 
-        async def get_candles(self, instrument, granularity, count):
+        def __init__(self):
+            self.appels = 0
+            self._histoire: dict[str, list] = {}
+
+        def _construire(self, granularity):
+            if granularity in self._histoire:
+                return self._histoire[granularity]
             # Graine stable : `hash()` sur une chaîne est randomisé à chaque
             # processus, le test deviendrait capricieux d'une exécution à l'autre.
             rng = random.Random(sum(granularity.encode()))
             # Amplitude plus large sur H4 que sur H1, comme en réel.
             pas = 0.0004 if granularity == "H4" else 0.0001
+            heures = 4 if granularity == "H4" else 1
+            base = datetime(2020, 1, 1, tzinfo=timezone.utc)
             bougies, prix = [], 1.10
-            for _ in range(count):
+            for i in range(20_000):
                 o = prix
                 c = prix + rng.gauss(0, pas)
                 bougies.append(Candle(
                     open=o, high=max(o, c) + abs(rng.gauss(0, pas / 2)),
                     low=min(o, c) - abs(rng.gauss(0, pas / 2)), close=c,
+                    time=(base + timedelta(hours=i * heures)).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"),
                 ))
                 prix = c
+            self._histoire[granularity] = bougies
             return bougies
+
+        async def get_quote(self, instrument):
+            # Marché fermé : spread élargi, comme chez un vrai courtier.
+            spread = 0.00052 if not marche_ouvert else 0.00011
+            return Quote(bid=1.10, ask=1.10 + spread, tradeable=marche_ouvert)
+
+        async def get_candles(self, instrument, granularity, count, before=None):
+            self.appels += 1
+            dispo = self._construire(granularity)
+            if before:
+                dispo = [c for c in dispo if c.time < before]
+            return dispo[-min(count, self.max_candles_per_request):]
 
     return Factice()
 
@@ -299,6 +326,9 @@ def test_les_cellules_de_backtest_s_executent_vraiment(capsys):
         assert "Traceback" not in sortie
         assert "Verdict" in sortie, sortie[-500:]
 
+        assert espace["courtier"].appels > 2, (
+            f"{espace['courtier'].appels} requêtes — le carnet n'a pas paginé"
+        )
         libelles = [l for l, _ in espace["resultats"]]
         if marche_ouvert:
             assert any("le tien" in l for l in libelles), libelles

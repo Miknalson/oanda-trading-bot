@@ -214,15 +214,50 @@ qui est pénible à corriger depuis un téléphone. Deux contournements :
 
 ```bash
 cd backend
-.venv/bin/python -m app.backtest --instrument EUR_USD --granularity H1 --count 1200
+.venv/bin/python -m app.backtest --instrument EUR_USD --granularity H4 --count 6000
 ```
 
-⚠️ `fetch_history` ne fait **qu'une seule requête**. Les clients n'exposent
-pas encore de pagination par date : boucler renverrait la même fenêtre, et
-empiler ces réponses fabriquerait un historique fait de doublons — un
-backtest qui tourne sans rien mesurer. Le plafond est donc celui du courtier
-(1200 bougies chez Saxo, 5000 chez OANDA). Remonter plus loin demandera
-d'ajouter une pagination par date dans chaque client.
+### Remonter l'historique par pages
+
+Les courtiers plafonnent chaque requête : 1200 bougies chez Saxo, 5000 chez
+OANDA. Sur H4 cela ne donnait que ~65 trades — trop peu pour conclure quoi que
+ce soit (voir *malchance* plus bas). `fetch_history` enchaîne donc les
+requêtes en reculant dans le temps : `Mode=UpTo` + `Time` chez Saxo, `to` chez
+OANDA, d'où le champ `Candle.time`.
+
+Le danger de cette boucle est précis. Si le courtier **ignore** le bornage, il
+renvoie à chaque tour la même fenêtre ; empiler ces réponses fabrique un
+historique de doublons, et un backtest dessus tourne, sort des chiffres
+crédibles, et ne mesure rien — invisible dans le résultat. La boucle vérifie
+donc à chaque page que le courtier a réellement reculé :
+
+> Si la bougie la plus **récente** de la nouvelle page est celle de la page
+> précédente, le bornage n'a pas été pris en compte.
+
+Ce test ne peut pas se déclencher à tort sur un historique épuisé : dans ce
+cas la fenêtre renvoyée serait plus ancienne, pas identique. En cas de
+détection, la récupération échoue franchement au lieu de rendre un historique
+long et faux. Sans horodatage sur les bougies, il n'y a rien à quoi se borner :
+une seule page est renvoyée, et c'est journalisé.
+
+⚠️ Les domaines de Saxo sont inaccessibles depuis l'environnement où ce code a
+été écrit : le contrat `Mode`/`Time` vient de sources tierces concordantes, pas
+de la documentation officielle lue directement. C'est précisément pourquoi le
+garde-fou ci-dessus existe — si l'hypothèse est fausse, on l'apprend par une
+erreur explicite et non par des résultats silencieusement faux.
+
+### Coût de calcul
+
+Les indicateurs ne reçoivent qu'une **fenêtre glissante** des dernières
+bougies (`INDICATOR_WINDOW`), pas tout l'historique. Leur passer l'historique
+entier à chaque barre donnait le même résultat en temps quadratique : la suite
+de tests est passée de 46 s à 2,2 s une fois la pagination en place. Un test
+vérifie que l'optimisation est exactement neutre, trade par trade.
+
+Le `max(0, ...)` sur le début de la fenêtre n'est pas décoratif : un indice
+négatif découperait la fin du tableau, donc des bougies **futures** — le
+regard vers le futur est l'erreur qui rend un backtest flatteur et faux, et
+elle se glisserait là sans rien casser.
 
 Le backtest rejoue la stratégie sur l'historique OANDA et mesure le taux de
 réussite **réel**, frais compris. Il réutilise les fonctions de
@@ -336,10 +371,16 @@ négociable ; le carnet, lui, ne regardait pas. Il le fait maintenant, et
 **balaie une fourchette de spreads** au lieu d'en relever un seul — parce
 qu'un verdict ne vaut que pour le spread qui l'a produit.
 
-*1200 bougies ne suffisent pas.* C'est la limite d'une requête chez Saxo. La
-prochaine étape utile n'est donc pas de retoucher la stratégie — ce serait du
-bricolage sur du bruit — mais d'aller chercher plus d'historique (pagination
-par date dans les clients) ou d'autres instruments.
+*1200 bougies ne suffisent pas.* C'était la limite d'une requête chez Saxo.
+`fetch_history` pagine désormais : 6000 bougies H4 donnent de l'ordre de 300
+trades, au-delà des ~134 nécessaires pour trancher. Ce qui suit reste à
+mesurer aux heures d'ouverture du marché.
+
+**À quoi s'attendre, honnêtement :** le verdict le plus probable est
+*perdant*. Un croisement de moyennes mobiles avec stop sur l'ATR est une
+stratégie classique et publique ; après spread et financement, ce genre de
+règle est net négatif le plus souvent. Plus de données sert à obtenir une
+réponse solide, pas à en espérer une meilleure.
 
 ## Notifications : paliers 25 / 50 / 75 / 100 %
 

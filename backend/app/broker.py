@@ -23,12 +23,20 @@ class BrokerError(RuntimeError):
 
 @dataclass(frozen=True)
 class Candle:
-    """Une bougie, en prix médians."""
+    """Une bougie, en prix médians.
+
+    `time` est l'horodatage ISO 8601 du début de la bougie, tel que le
+    courtier le renvoie. Il est facultatif — une bougie reste exploitable
+    sans — mais c'est lui qui rend la pagination possible : pour demander
+    « ce qui précède », il faut savoir où l'on s'est arrêté. Sans date, un
+    historique ne peut pas être remonté au-delà d'une requête.
+    """
 
     open: float
     high: float
     low: float
     close: float
+    time: str = ""
 
 
 @dataclass(frozen=True)
@@ -89,10 +97,21 @@ class Broker(Protocol):
         """Instruments négociables sur le compte."""
         ...
 
+    # Plafond de bougies par requête, propre à chaque courtier. Sert à
+    # dimensionner les pages quand on remonte l'historique.
+    max_candles_per_request: int
+
     async def get_candles(
-        self, instrument: str, granularity: str, count: int
+        self, instrument: str, granularity: str, count: int, before: str | None = None
     ) -> list[Candle]:
-        """Les `count` dernières bougies, de la plus ancienne à la plus récente."""
+        """Les `count` dernières bougies, de la plus ancienne à la plus récente.
+
+        `before` : horodatage ISO 8601. Quand il est fourni, seules des
+        bougies STRICTEMENT antérieures doivent être renvoyées — c'est ce qui
+        permet de remonter l'historique page par page. Un courtier qui
+        l'ignore renverrait la même fenêtre indéfiniment ; `fetch_history` le
+        détecte et refuse de continuer plutôt que d'empiler des doublons.
+        """
         ...
 
     async def get_quote(self, instrument: str) -> Quote:

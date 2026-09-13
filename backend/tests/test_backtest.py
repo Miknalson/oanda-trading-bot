@@ -6,14 +6,18 @@ qu'elle produira.
 """
 from __future__ import annotations
 
+import asyncio
 import random
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.backtest import run_backtest  # noqa: E402
-from app.broker import Candle  # noqa: E402
+from app.backtest import fetch_history, run_backtest  # noqa: E402
+from app.broker import BrokerError, Candle  # noqa: E402
 
 
 def candle(o, h, l, c):
@@ -233,36 +237,186 @@ def test_financing_is_zero_when_rate_is_zero():
 
 
 
-def test_fetch_history_never_duplicates():
-    """Une seule requête : jamais d'historique fabriqué par répétition.
+class CourtierHistorique:
+    """Courtier factice avec un vrai historique daté et borné.
 
-    Les clients ne savent pas encore demander « plus ancien que telle date ».
-    Boucler renverrait la même fenêtre ; empiler ces réponses produirait un
-    backtest qui tourne sans rien mesurer.
+    Reproduit le comportement attendu : `before` ne renvoie que des bougies
+    strictement antérieures, et chaque réponse est plafonnée.
     """
-    import asyncio
-    from app.backtest import fetch_history
 
-    class ClientQuiRepete:
-        """Renvoie toujours la même fenêtre, comme un vrai courtier sans pagination."""
+    def __init__(self, bougies: int = 10_000, taille_max: int = 1200):
+        self.max_candles_per_request = taille_max
+        self.appels = 0
+        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        self.histoire = [
+            Candle(
+                open=1.10 + i * 1e-5, high=1.10 + i * 1e-5,
+                low=1.10 + i * 1e-5, close=1.10 + i * 1e-5,
+                time=(base + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            for i in range(bougies)
+        ]
 
-        def __init__(self, taille_max=1200):
-            self.taille_max = taille_max
+    async def get_candles(self, instrument, granularity, count, before=None):
+        self.appels += 1
+        dispo = self.histoire
+        if before:
+            dispo = [c for c in dispo if c.time < before]
+        return dispo[-min(count, self.max_candles_per_request):]
+
+
+def test_fetch_history_pagine_et_ne_duplique_rien():
+    """La pagination doit dépasser le plafond d'une requête, sans doublon."""
+    client = CourtierHistorique(bougies=10_000, taille_max=1200)
+    bougies = asyncio.run(fetch_history(client, "EUR_USD", "H1", 3000))
+
+    assert len(bougies) == 3000, len(bougies)
+    dates = [b.time for b in bougies]
+    assert len(set(dates)) == 3000, "des bougies dupliquées se sont glissées dedans"
+    assert dates == sorted(dates), "les bougies ne sont pas dans l'ordre chronologique"
+    # Les 3000 doivent être les PLUS RÉCENTES de l'historique.
+    assert dates[-1] == client.histoire[-1].time
+    assert client.appels == 3, f"{client.appels} requêtes pour 3 pages de 1200"
+    print(f"  {len(bougies)} bougies uniques et ordonnées en {client.appels} requêtes")
+
+
+def test_fetch_history_refuse_un_historique_en_doublons():
+    """Un courtier qui ignore le bornage doit faire ÉCHOUER la récupération.
+
+    C'est la raison d'être du garde-fou : empiler des fenêtres identiques
+    fabriquerait un historique de doublons. Un backtest dessus tourne, sort
+    des chiffres crédibles, et ne mesure rien. Mieux vaut une erreur franche.
+    """
+    class CourtierQuiIgnoreLeBornage(CourtierHistorique):
+        async def get_candles(self, instrument, granularity, count, before=None):
+            self.appels += 1  # `before` jeté à la poubelle, comme une API v1
+            return self.histoire[-min(count, self.max_candles_per_request):]
+
+    client = CourtierQuiIgnoreLeBornage()
+    with pytest.raises(BrokerError) as erreur:
+        asyncio.run(fetch_history(client, "EUR_USD", "H1", 5000))
+
+    message = str(erreur.value)
+    assert "même fenêtre" in message, message
+    assert "doublons" in message, message
+    print(f"  bornage ignoré -> erreur franche : « {message[:60]}... »")
+
+
+def test_fetch_history_s_arrete_au_debut_de_l_historique():
+    """Demander plus que ce qui existe doit rendre tout, sans boucler sans fin."""
+    client = CourtierHistorique(bougies=2_500, taille_max=1200)
+    bougies = asyncio.run(fetch_history(client, "EUR_USD", "H1", 99_000))
+
+    assert len(bougies) == 2_500, len(bougies)
+    assert len({b.time for b in bougies}) == 2_500
+    print(f"  historique de 2500 bougies entièrement remonté en {client.appels} requêtes")
+
+
+def test_fetch_history_sans_horodatage_ne_pagine_pas():
+    """Sans date, il n'y a rien à quoi se borner : une seule page, et on le dit.
+
+    Boucler à l'aveugle redemanderait la même fenêtre — exactement le
+    scénario que le garde-fou précédent interdit.
+    """
+    class CourtierSansDates:
+        max_candles_per_request = 1200
+
+        def __init__(self):
             self.appels = 0
 
-        async def get_candles(self, instrument, granularity, count):
+        async def get_candles(self, instrument, granularity, count, before=None):
             self.appels += 1
-            n = min(count, self.taille_max)
+            n = min(count, self.max_candles_per_request)
             return [candle(1.0 + i, 1.0 + i, 1.0 + i, 1.0 + i) for i in range(n)]
 
-    client = ClientQuiRepete()
+    client = CourtierSansDates()
     bougies = asyncio.run(fetch_history(client, "EUR_USD", "H1", 5000))
 
-    assert client.appels == 1, f"{client.appels} requêtes au lieu d'une seule"
+    assert client.appels == 1, f"{client.appels} requêtes alors qu'aucune date"
     assert len(bougies) == 1200, len(bougies)
     closes = [b.close for b in bougies]
-    assert len(closes) == len(set(closes)), "des bougies dupliquées se sont glissées dedans"
-    print(f"  {len(bougies)} bougies uniques en 1 requête, aucun doublon")
+    assert len(closes) == len(set(closes)), "des doublons malgré tout"
+    print(f"  pas d'horodatage -> {len(bougies)} bougies en 1 requête, aucun doublon")
+
+
+def test_le_bornage_demande_est_bien_anterieur():
+    """Chaque page doit être demandée avant la plus ancienne déjà connue."""
+    class CourtierEspion(CourtierHistorique):
+        def __init__(self):
+            super().__init__()
+            self.bornes = []
+
+        async def get_candles(self, instrument, granularity, count, before=None):
+            self.bornes.append(before)
+            return await super().get_candles(instrument, granularity, count, before)
+
+    client = CourtierEspion()
+    asyncio.run(fetch_history(client, "EUR_USD", "H1", 3000))
+
+    assert client.bornes[0] is None, "la première page ne doit pas être bornée"
+    bornes = client.bornes[1:]
+    assert bornes == sorted(bornes, reverse=True), (
+        f"les bornes ne reculent pas dans le temps : {bornes}"
+    )
+    print(f"  bornes demandées, du plus récent au plus ancien : {bornes}")
+
+
+def test_la_fenetre_glissante_ne_change_aucun_resultat():
+    """L'optimisation doit être exactement neutre sur les résultats.
+
+    `run_backtest` ne passe plus tout l'historique aux indicateurs mais une
+    fenêtre des dernières bougies — la SMA lente et l'ATR ne regardent rien
+    de plus loin. Une optimisation qui déplace ne serait-ce qu'un trade
+    invaliderait tous les chiffres mesurés jusqu'ici, donc on le vérifie au
+    lieu de le supposer.
+    """
+    from app import backtest as module
+    from app.indicators import atr as atr_reel
+    from app.indicators import trend_direction as tendance_reelle
+
+    candles = random_walk(1500, seed=21)
+
+    rapide = run_backtest(candles, spread=0.00008, instrument="T", granularity="H1")
+
+    # Rejoue en forçant les indicateurs à voir TOUT l'historique, via une
+    # fenêtre assez large pour qu'elle n'en retire rien.
+    ancienne = module.INDICATOR_WINDOW
+    module.INDICATOR_WINDOW = len(candles)
+    try:
+        complet = run_backtest(candles, spread=0.00008, instrument="T", granularity="H1")
+    finally:
+        module.INDICATOR_WINDOW = ancienne
+
+    assert len(rapide.trades) == len(complet.trades), (
+        f"{len(rapide.trades)} trades avec fenêtre, {len(complet.trades)} sans"
+    )
+    assert rapide.wins == complet.wins
+    assert abs(rapide.net_pl - complet.net_pl) < 1e-9
+    for a, b in zip(rapide.trades, complet.trades):
+        assert a.entry_index == b.entry_index
+        assert a.direction == b.direction
+        assert abs(a.stop_loss - b.stop_loss) < 1e-12
+        assert abs(a.take_profit - b.take_profit) < 1e-12
+
+    # Un départ de fenêtre négatif découperait la FIN du tableau, donc des
+    # bougies futures. L'invariant qui l'empêche doit tenir.
+    assert module.WARMUP + 1 > module.INDICATOR_WINDOW - 1, (
+        "la première barre examinée n'a pas assez de passé pour sa fenêtre"
+    )
+
+    # Et la fenêtre doit bien couvrir ce dont les indicateurs ont besoin.
+    assert module.INDICATOR_WINDOW >= module.SLOW_PERIOD
+    assert module.INDICATOR_WINDOW >= module.ATR_PERIOD + 1
+    assert atr_reel(candles[:module.INDICATOR_WINDOW], module.ATR_PERIOD) is not None
+    assert tendance_reelle(
+        [c.close for c in candles[:module.INDICATOR_WINDOW]],
+        module.FAST_PERIOD, module.SLOW_PERIOD,
+    ) is not None
+
+    print(
+        f"  {len(rapide.trades)} trades identiques au trade près, "
+        f"fenêtre de {ancienne} bougies contre {len(candles)}"
+    )
 
 
 if __name__ == "__main__":

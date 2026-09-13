@@ -142,6 +142,13 @@ Le chiffre qui décide de tout est le **taux de réussite comparé au seuil
 d'équilibre**. En dessous, la stratégie perd de l'argent — quoi qu'en dise
 l'impression générale.
 
+Le carnet remonte l'historique **par pages** : Saxo plafonne chaque requête à
+1200 bougies, ce qui ne donnait que ~65 trades sur H4 — trop peu pour
+conclure quoi que ce soit. La récupération enchaîne donc plusieurs requêtes
+en reculant dans le temps, et vérifie à chaque page que le courtier a
+réellement reculé (sinon elle s'arrête en erreur, plutôt que d'empiler des
+doublons qui donneraient un backtest crédible mesurant du vide).
+
 ⚠️ **Le spread ne se relève pas, il se balaie.** Un seul relevé instantané
 ne dit rien sur 1200 bougies : il change d'heure en heure, et **marché fermé
 il est élargi et figé**. Un premier essai un samedi soir a relevé 5,2 pips
@@ -154,7 +161,8 @@ code("""from app.backtest import run_backtest, fetch_history
 
 INSTRUMENT = "EUR_USD"
 INTERVALLES = ["H1", "H4"]   # M1 et M5 sont refusés : le spread y est ruineux
-BOUGIES = 1200               # plafond par requête chez Saxo
+BOUGIES = 6000               # remonté par pages : le plafond par requête
+                             # chez Saxo est de 1200, fetch_history enchaîne
 
 cours = await courtier.get_quote(INSTRUMENT)
 pips = cours.spread * 10000
@@ -178,11 +186,18 @@ SPREADS = {
 if cours.tradeable:
     SPREADS[f"{pips:.1f} pip (le tien)"] = cours.spread
 
-# L'historique ne dépend pas du spread : une seule requête par intervalle.
+# L'historique ne dépend pas du spread : on le récupère une fois par
+# intervalle, puis on rejoue la stratégie dessus avec chaque spread.
+# Cette étape prend quelques dizaines de secondes : elle enchaîne plusieurs
+# requêtes pour remonter au-delà du plafond de 1200 bougies.
 historique = {}
 for g in INTERVALLES:
     historique[g] = await fetch_history(courtier, INSTRUMENT, g, BOUGIES)
-    print(f"{g} : {len(historique[g])} bougies")
+    bougies = historique[g]
+    periode = ""
+    if bougies and bougies[0].time and bougies[-1].time:
+        periode = f" — du {bougies[0].time[:10]} au {bougies[-1].time[:10]}"
+    print(f"{g} : {len(bougies)} bougies{periode}")
 
 resultats = []
 for g in INTERVALLES:

@@ -52,6 +52,9 @@ GRANULARITY_MINUTES = {
 
 
 class SaxoClient:
+    # Plafond documenté de /chart/v3/charts : 1200 points par requête.
+    max_candles_per_request = 1200
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         if not self.settings.saxo_access_token:
@@ -172,7 +175,8 @@ class SaxoClient:
         return names
 
     async def get_candles(
-        self, instrument: str, granularity: str = "M5", count: int = 50
+        self, instrument: str, granularity: str = "M5", count: int = 50,
+        before: str | None = None,
     ) -> list[Candle]:
         minutes = GRANULARITY_MINUTES.get(granularity)
         if minutes is None:
@@ -182,23 +186,28 @@ class SaxoClient:
         # /chart/v3/charts : la V1 est dépréciée et renvoie 404 (une page
         # d'erreur HTML, pas une réponse d'API — le chemin n'existe plus).
         #
-        # Uic, AssetType et Horizon sont les paramètres requis. `Mode` ne
-        # s'emploie qu'avec `Time` pour cadrer une fenêtre précise : sans lui,
-        # l'API renvoie les bougies les plus récentes, ce qu'on veut.
-        data = await self._request(
-            "GET", "/chart/v3/charts",
-            params={
-                "Uic": uic,
-                "AssetType": "FxSpot",
-                "Horizon": minutes,
-                "Count": min(count, 1200),  # plafond de l'API
-            },
-        )
+        # Uic, AssetType et Horizon sont les paramètres requis. Sans `Time`,
+        # l'API renvoie les bougies les plus récentes, ce qu'on veut par défaut.
+        params = {
+            "Uic": uic,
+            "AssetType": "FxSpot",
+            "Horizon": minutes,
+            "Count": min(count, self.max_candles_per_request),
+        }
+        # Pour remonter plus loin : `Mode=UpTo` borne la fenêtre à ce qui
+        # précède `Time`. Les deux vont ensemble — `Mode` seul n'a pas de sens
+        # et peut être rejeté, c'est pourquoi il n'est ajouté qu'ici.
+        if before:
+            params["Mode"] = "UpTo"
+            params["Time"] = before
+
+        data = await self._request("GET", "/chart/v3/charts", params=params)
         brutes = data.get("Data", [])
         candles = []
         for c in brutes:
             # Saxo renvoie OpenBid/OpenAsk sur certains comptes et Open sur
             # d'autres : on prend le médian quand les deux côtés existent.
+            horodatage = str(c.get("Time", ""))
             if "OpenBid" in c and "OpenAsk" in c:
                 candles.append(
                     Candle(
@@ -206,11 +215,13 @@ class SaxoClient:
                         high=(c["HighBid"] + c["HighAsk"]) / 2,
                         low=(c["LowBid"] + c["LowAsk"]) / 2,
                         close=(c["CloseBid"] + c["CloseAsk"]) / 2,
+                        time=horodatage,
                     )
                 )
             elif "Open" in c:
                 candles.append(
-                    Candle(open=c["Open"], high=c["High"], low=c["Low"], close=c["Close"])
+                    Candle(open=c["Open"], high=c["High"], low=c["Low"],
+                           close=c["Close"], time=horodatage)
                 )
 
         # Des bougies reçues mais aucune comprise : le format a changé, ou il

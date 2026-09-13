@@ -27,6 +27,9 @@ class OandaError(BrokerError):
 
 
 class OandaClient:
+    # Plafond documenté de /v3/instruments/{}/candles : 5000 par requête.
+    max_candles_per_request = 5000
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         if not self.settings.oanda_api_key:
@@ -67,18 +70,27 @@ class OandaClient:
         return [i["name"] for i in data.get("instruments", [])]
 
     async def get_candles(
-        self, instrument: str, granularity: str = "M5", count: int = 50
+        self, instrument: str, granularity: str = "M5", count: int = 50,
+        before: str | None = None,
     ) -> list[Candle]:
-        data = await self._get(
-            f"/v3/instruments/{instrument}/candles",
-            {"granularity": granularity, "count": count, "price": "M"},
-        )
+        params: dict = {
+            "granularity": granularity,
+            "count": min(count, self.max_candles_per_request),
+            "price": "M",
+        }
+        # v20 borne la fenêtre par la fin avec `to` : combiné à `count`, il
+        # renvoie les `count` bougies qui précèdent cet instant.
+        if before:
+            params["to"] = before
+
+        data = await self._get(f"/v3/instruments/{instrument}/candles", params)
         return [
             Candle(
                 open=float(c["mid"]["o"]),
                 high=float(c["mid"]["h"]),
                 low=float(c["mid"]["l"]),
                 close=float(c["mid"]["c"]),
+                time=str(c.get("time", "")),
             )
             for c in data.get("candles", [])
             if c.get("mid")
