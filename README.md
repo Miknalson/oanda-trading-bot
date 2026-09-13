@@ -3,6 +3,17 @@
 Scanner de volatilité + assistant de trading, piloté depuis une PWA mobile.
 Fonctionne avec **Saxo Bank** (OpenAPI) ou **OANDA** (REST v20).
 
+## ⚠️ Le nom de ce dépôt est trompeur
+
+Il s'appelle `oanda-trading-bot` pour des raisons historiques : le projet a
+démarré sur OANDA, avant qu'on découvre que **l'entité européenne d'OANDA
+(TMS Brokers, qui sert les clients français) n'expose pas l'API REST v20** —
+son offre passe par MetaTrader 5. Tout tourne désormais sur Saxo.
+
+Un renommage est prévu. GitHub conserve alors l'historique complet et
+**redirige l'ancienne adresse**, donc `git clone` et le carnet Colab
+continueront de fonctionner sans modification.
+
 ## Choisir un courtier
 
 Le projet a d'abord été écrit contre OANDA, jusqu'à découvrir que **l'entité

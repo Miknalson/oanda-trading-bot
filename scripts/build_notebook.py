@@ -67,7 +67,19 @@ for racine, dossiers, _ in os.walk(DOSSIER):
 # 3. Le cache des répertoires du système d'import.
 importlib.invalidate_caches()
 
+# Un dépôt vide ou renommé se clone SANS ERREUR : git est content, le dossier
+# existe, et la panne n'apparaît que plus loin sous la forme d'un
+# « ModuleNotFoundError: app » incompréhensible. On vérifie donc que le code
+# est réellement là, et on nomme la cause.
 chemin = f"{DOSSIER}/backend"
+if not os.path.isfile(f"{chemin}/app/main.py"):
+    contenu = sorted(os.listdir(DOSSIER)) if os.path.isdir(DOSSIER) else []
+    print(f"❌ Le dépôt {REPO} ne contient pas le code attendu :")
+    print(f"   {chemin}/app/main.py est absent.")
+    print(f"   Contenu récupéré : {contenu or 'vide'}")
+    print("   Vérifie le nom du dépôt dans la variable REPO ci-dessus.")
+    raise SystemExit(1)
+
 if chemin not in sys.path:
     sys.path.insert(0, chemin)
 

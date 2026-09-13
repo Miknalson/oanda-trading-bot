@@ -342,6 +342,57 @@ def test_les_cellules_de_backtest_s_executent_vraiment(capsys):
               f"{len(espace['resultats'])} backtests, sortie cohérente")
 
 
+def test_un_depot_vide_est_detecte_et_nomme():
+    """Cloner le mauvais dépôt ne doit pas échouer trois cellules plus loin.
+
+    Un dépôt vide ou renommé se clone SANS erreur : git est content, le
+    dossier existe. La panne n'apparaît qu'à l'import, sous la forme d'un
+    « ModuleNotFoundError: app » qui n'oriente vers rien. Le cas est concret :
+    ce compte possède un second dépôt, vide, dont le nom ressemble au bon.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    cellule = "".join(
+        [c for c in json.loads(CARNET.read_text())["cells"]
+         if c["cell_type"] == "code"][0]["source"]
+    )
+    assert "main.py" in cellule, "la cellule 1 ne vérifie plus le contenu cloné"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        vide = os.path.join(tmp, "vide")
+        subprocess.run(["git", "init", "-q", "-b", "main", vide],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "-C", vide, "commit", "-q", "--allow-empty", "-m", "v"],
+                       check=True, capture_output=True)
+        clone = os.path.join(tmp, "clone")
+        subprocess.run(["git", "clone", "-q", "file://" + vide, clone],
+                       check=True, capture_output=True)
+
+        code = (cellule
+                .replace('gh_token = getpass.getpass('
+                         '"Token GitHub (laisse vide si le dépôt est public) : ").strip()',
+                         'gh_token = ""')
+                .replace('DOSSIER = "oanda-trading-bot"', f'DOSSIER = {clone!r}')
+                .replace('subprocess.run([sys.executable, "-m", "pip", "install", '
+                         '"-q", "httpx", "python-dotenv"], check=True)', 'pass'))
+
+        sauvegarde = list(sys.path)
+        try:
+            exec(compile(code, "cellule_1", "exec"), {"__name__": "__main__"})
+            raise AssertionError(
+                "la cellule a continué sur un dépôt vide au lieu de s'arrêter"
+            )
+        except SystemExit as sortie:
+            assert sortie.code == 1, sortie.code
+        finally:
+            sys.path[:] = sauvegarde
+
+    print("  dépôt vide -> arrêt immédiat en nommant la cause")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
