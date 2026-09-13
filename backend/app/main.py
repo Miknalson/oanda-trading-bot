@@ -12,10 +12,13 @@ nombre de trades) ne peuvent pas être contournés depuis l'app.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import BaseModel, Field
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .analysis import SpreadTooWideError, TradeAnalyzer
 from .broker import Broker, BrokerError
@@ -174,6 +177,21 @@ async def place_order(req: PlaceOrderRequest) -> dict:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return {"broker": settings.broker, "trade_id": result}
+
+
+@app.get("/api/account")
+async def account() -> dict:
+    """Solde réel du compte, tel que le courtier le déclare.
+
+    L'app en a besoin pour deux choses : l'afficher, et laisser l'utilisateur
+    dimensionner objectif et perte max en connaissance de cause. Elle ne
+    devine jamais le capital disponible.
+    """
+    try:
+        summary = await get_client().get_account_summary()
+    except BrokerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"balance": summary.balance, "currency": summary.currency}
 
 
 @app.get("/api/positions")
@@ -354,3 +372,18 @@ async def session_milestones(session_id: str) -> dict:
         else 0.0,
         "milestones": [m.to_dict() for m in session.milestones],
     }
+
+
+# --------------------------------------------------------------------------
+# La PWA est servie par le backend lui-même.
+#
+# Deux raisons, et la seconde est la vraie. D'abord, une seule origine : plus
+# aucun CORS à configurer, et c'est un réglage CORS qui avait déjà bloqué tous
+# les POST de l'app. Ensuite, une seule URL : sur un téléphone, « ouvrir
+# l'app » doit être un lien, pas un serveur à lancer à la main.
+#
+# Le montage vient APRÈS toutes les routes : Starlette les teste dans l'ordre
+# d'enregistrement, donc /api/... reste prioritaire sur les fichiers statiques.
+FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
+if FRONTEND_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

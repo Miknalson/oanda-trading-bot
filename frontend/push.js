@@ -1,10 +1,18 @@
 // Abonnement de la PWA aux notifications push.
 //
+// Pas de `export` ici : index.html charge ce fichier en script classique.
+// Un `export` dans un script non-module lève « Unexpected token 'export' »,
+// et c'est TOUT le fichier qui ne s'exécute pas — le bouton d'activation
+// restait donc muet sans aucune erreur visible à l'écran.
+//
 // À appeler depuis un geste utilisateur (clic sur un bouton) : les
 // navigateurs refusent une demande de permission déclenchée automatiquement
 // au chargement de la page.
 
-const PUSH_API_BASE = window.API_BASE || "http://localhost:8000";
+// Même origine par défaut : le backend sert cette page, donc les chemins
+// relatifs suffisent et il n'y a aucun CORS à configurer. `window.API_BASE`
+// reste utile pour viser un backend distant depuis un fichier local.
+const PUSH_API_BASE = window.API_BASE || "";
 
 function urlBase64ToUint8Array(base64String) {
   // La clé VAPID est en base64url ; l'API navigateur attend un Uint8Array.
@@ -14,7 +22,7 @@ function urlBase64ToUint8Array(base64String) {
   return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
 }
 
-export async function enablePushNotifications() {
+async function enablePushNotifications() {
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
     throw new Error(
       "Ce navigateur ne gère pas les notifications push. Sur iPhone, ajoute " +
@@ -57,7 +65,7 @@ export async function enablePushNotifications() {
   return res.json();
 }
 
-export async function disablePushNotifications() {
+async function disablePushNotifications() {
   const registration = await navigator.serviceWorker.ready;
   const subscription = await registration.pushManager.getSubscription();
   if (!subscription) return { removed: false };
@@ -70,3 +78,8 @@ export async function disablePushNotifications() {
   await subscription.unsubscribe();
   return { removed: true };
 }
+
+// Exposé explicitement : ces fonctions sont appelées depuis app.js, qui est
+// lui aussi un script classique.
+window.enablePushNotifications = enablePushNotifications;
+window.disablePushNotifications = disablePushNotifications;

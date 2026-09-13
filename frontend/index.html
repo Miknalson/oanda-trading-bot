@@ -3,51 +3,148 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>OANDA Scanner</title>
+  <title>Bot de trading</title>
   <meta name="theme-color" content="#0b0f14" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <link rel="manifest" href="manifest.json" />
+  <!-- Déclarée explicitement : sans elle le navigateur demande /favicon.ico,
+       que le backend ne sert pas, et le 404 pollue la console. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0f14'/%3E%3Cpath d='M12 44 L24 30 L34 38 L52 18' stroke='%234fd1a5' stroke-width='5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="topbar">
-    <h1>Scanner de volatilité</h1>
+    <h1>Bot de trading</h1>
     <span id="env-badge" class="badge">…</span>
   </header>
 
   <main>
-    <div class="controls">
-      <label>
-        Intervalle
-        <select id="granularity">
-          <option value="M1">1 min</option>
-          <option value="M5" selected>5 min</option>
-          <option value="M15">15 min</option>
-          <option value="H1">1 h</option>
-        </select>
-      </label>
-      <button id="refresh">Rafraîchir</button>
-    </div>
-
-    <p id="status" class="status"></p>
-
-    <ul id="results" class="results"></ul>
-
-    <section id="suggestion-panel" class="suggestion hidden">
-      <h2>Suggestion de trade — <span id="sug-instrument"></span></h2>
-
-      <div class="field-row">
-        <label>
-          Risque par trade (%)
-          <input id="risk-pct" type="number" min="0.1" max="2" step="0.1" value="1" />
-        </label>
-        <label>
-          Objectif de gain (dans ta devise de compte)
-          <input id="objective-amount" type="number" min="1" step="1" value="20" />
-        </label>
+    <!-- Solde réel du compte : l'app ne devine pas, elle demande au courtier. -->
+    <section class="card">
+      <div class="account-row">
+        <span class="label">Solde du compte</span>
+        <span id="account-balance" class="value">…</span>
       </div>
-      <button id="analyze">Analyser</button>
+      <p id="limits" class="hint"></p>
+    </section>
 
-      <div id="suggestion-result" class="suggestion-result hidden">
+    <!-- ============ SESSION EN COURS ============ -->
+    <!-- Affichée en premier : quand une session tourne, c'est la seule
+         chose qui compte. Le scanner ne sert qu'à en démarrer une. -->
+    <section id="live-panel" class="card live hidden">
+      <h2>Session en cours — <span id="live-instrument"></span></h2>
+
+      <div class="live-head">
+        <span id="live-status" class="badge">…</span>
+        <span id="live-pl" class="pl">…</span>
+      </div>
+
+      <div class="progress-block">
+        <div class="progress-label">
+          <span>Vers l'objectif</span>
+          <span id="gain-pct">0 %</span>
+        </div>
+        <div class="bar"><div id="gain-bar" class="fill gain"></div></div>
+        <div class="progress-sub" id="gain-sub"></div>
+      </div>
+
+      <div class="progress-block">
+        <div class="progress-label">
+          <span>Vers la perte max</span>
+          <span id="loss-pct">0 %</span>
+        </div>
+        <div class="bar"><div id="loss-bar" class="fill loss"></div></div>
+        <div class="progress-sub" id="loss-sub"></div>
+      </div>
+
+      <div class="account-row">
+        <span class="label">Trades enchaînés</span>
+        <span id="live-trades" class="value">0</span>
+      </div>
+
+      <div id="live-milestones" class="milestones"></div>
+      <p id="live-reason" class="hint"></p>
+
+      <button id="stop-session" class="danger">Arrêter la session</button>
+      <p class="disclaimer">
+        Arrêter empêche tout NOUVEAU trade. Un trade déjà ouvert garde son
+        stop-loss et son take-profit chez le courtier et se fermera seul à
+        l'un des deux prix.
+      </p>
+    </section>
+
+    <!-- ============ SCANNER ============ -->
+    <section class="card">
+      <h2>Marchés les plus volatils</h2>
+      <div class="controls">
+        <label>
+          Intervalle
+          <select id="granularity">
+            <option value="M5">5 min</option>
+            <option value="M15" selected>15 min</option>
+            <option value="H1">1 h</option>
+            <option value="H4">4 h</option>
+          </select>
+        </label>
+        <button id="refresh">Rafraîchir</button>
+      </div>
+      <p id="status" class="status"></p>
+      <ul id="results" class="results"></ul>
+      <p class="hint">
+        Le pourcentage est l'amplitude du marché sur la période : de combien il
+        a bougé entre son plus bas et son plus haut. Plus il bouge, plus il y a
+        d'occasions — et plus le risque est grand.
+      </p>
+    </section>
+
+    <!-- ============ DÉMARRER UNE SESSION ============ -->
+    <section id="start-panel" class="card hidden">
+      <h2>Nouvelle session — <span id="start-instrument"></span></h2>
+
+      <label class="field">
+        Objectif de gain cumulé
+        <input id="objective-amount" type="number" min="1" step="1" value="20" />
+        <span class="field-hint">
+          Atteint par une suite de petits trades, pas en un seul coup.
+        </span>
+      </label>
+
+      <label class="field">
+        Perte maximale acceptée
+        <input id="max-loss-amount" type="number" min="1" step="1" placeholder="obligatoire" />
+        <span class="field-hint">
+          Obligatoire. La session s'arrête net avant de dépasser ce montant.
+          C'est la seule chose qui borne tes pertes si tu ne regardes pas.
+        </span>
+      </label>
+
+      <label class="field">
+        Risque par trade (% du solde)
+        <input id="risk-pct" type="number" min="0.1" max="2" step="0.1" value="1" />
+        <span class="field-hint">
+          Ce que tu perds si UN trade touche son stop-loss — pas un seuil de
+          sortie du compte. <strong id="risk-amount"></strong>
+        </span>
+      </label>
+
+      <label class="field">
+        Intervalle d'analyse
+        <select id="session-granularity">
+          <option value="M15">15 min</option>
+          <option value="H1" selected>1 h</option>
+          <option value="H4">4 h</option>
+        </select>
+        <span class="field-hint">
+          H1 est le compromis : le spread pèse moins qu'en M5, le financement
+          moins qu'en H4.
+        </span>
+      </label>
+
+      <p id="scale-warning" class="disclaimer strong hidden"></p>
+
+      <button id="preview">Voir le premier trade</button>
+      <div id="preview-result" class="preview hidden">
         <p><strong>Direction :</strong> <span id="s-direction"></span></p>
         <p><strong>Entrée :</strong> <span id="s-entry"></span></p>
         <p><strong>Stop-loss :</strong> <span id="s-sl"></span></p>
@@ -56,27 +153,39 @@
         <p><strong>Montant risqué :</strong> <span id="s-risk"></span></p>
         <p><strong>Ratio gain/risque :</strong> <span id="s-ratio"></span></p>
         <p class="rationale" id="s-rationale"></p>
-        <p class="disclaimer strong">
-          Aucune garantie de résultat. En cliquant "Lancer", tu places un ordre
-          réel avec ce stop-loss et ce take-profit attachés — le bot ne fera
-          plus rien après, OANDA ferme la position automatiquement à l'un des
-          deux prix.
-        </p>
-        <button id="launch" class="launch">Lancer le trade</button>
       </div>
+
+      <button id="start-session" class="launch">Lancer la session</button>
+      <p class="disclaimer strong">
+        Aucune garantie de gain. Le bot limite ton risque, il ne le supprime
+        pas. Rien n'est envoyé tant que tu n'as pas cliqué ci-dessus.
+      </p>
     </section>
 
-    <section id="positions-panel">
-      <h2>Positions ouvertes</h2>
+    <!-- ============ NOTIFICATIONS ============ -->
+    <section class="card">
+      <h2>Notifications</h2>
+      <p class="hint">
+        Paliers 25 / 50 / 75 / 100 % — dans les deux sens, vers l'objectif
+        comme vers la perte max.
+      </p>
+      <button id="enable-push">Activer les notifications</button>
+      <p id="push-status" class="status"></p>
+    </section>
+
+    <section class="card">
+      <h2>Positions ouvertes chez le courtier</h2>
       <ul id="positions" class="results"></ul>
     </section>
   </main>
 
   <p class="disclaimer">
-    Phase 3 — un ordre n'est envoyé que lorsque tu cliques explicitement
-    "Lancer le trade" ci-dessus. Le bot ne trade jamais sans ta confirmation.
+    Rien n'est jamais exécuté sans ton clic. Plusieurs plafonds côté serveur
+    (risque par trade, perte max de session, nombre de trades) ne peuvent pas
+    être contournés depuis cette page.
   </p>
 
+  <script src="push.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

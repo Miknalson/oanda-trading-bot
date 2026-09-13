@@ -414,6 +414,107 @@ def test_manual_stop_is_notified():
     print(f"  arrêt manuel -> notifié : « {fins[0].title} »")
 
 
+def test_risque_par_trade_superieur_a_la_perte_max_est_refuse_au_demarrage():
+    """Une configuration où aucun trade ne peut tenir doit être refusée.
+
+    Avec 1 % de risque sur un solde de 1000, chaque trade risque 10. Si la
+    perte max de la session vaut 10 aussi, le garde-fou d'avant-trade bloque
+    la toute première entrée : la session démarrait pour s'arrêter aussitôt,
+    zéro trade, sans explication. C'est un problème de réglage, il doit être
+    dit au démarrage et nommer les deux issues.
+    """
+    client = FakeClient([], balance=1000.0)
+    mgr = SessionManager(client, make_settings())
+    try:
+        asyncio.run(mgr.start(
+            instrument="EUR_USD", risk_pct=0.02, objective_amount=20.0,
+            max_loss_amount=10.0, reward_ratio=1.5,
+        ))
+        raise AssertionError("la session a démarré alors qu'aucun trade ne peut tenir")
+    except SessionError as exc:
+        message = str(exc)
+
+    assert "20.00" in message, message          # risque par trade
+    assert "10.00" in message, message          # perte max
+    assert "Baisse le risque" in message, message
+    assert not client.orders, "un ordre a été passé malgré le refus"
+    print(f"  refusé au démarrage : « {message[:72]}… »")
+
+
+def test_un_risque_egal_a_la_perte_max_laisse_passer_un_trade():
+    """La perte max est un plafond ATTEIGNABLE, pas une valeur interdite.
+
+    Un trade dont la perte atterrirait exactement sur la limite reste dans ce
+    que l'utilisateur a accepté. Avec une comparaison non stricte, ce trade
+    était refusé et la session se terminait à zéro trade.
+    """
+    session, client = asyncio.run(
+        run_session(["loss"], max_loss=2.5, objective=20.0, balance=250.0)
+    )
+    assert len(client.orders) >= 1, (
+        f"aucun trade ouvert alors que la perte max vaut exactement le risque "
+        f"par trade (statut : {session.stop_reason})"
+    )
+    print(
+        f"  risque = perte max -> {len(client.orders)} trade(s) ouvert(s), "
+        f"fin : {session.stop_reason}"
+    )
+
+
+def test_aucune_alerte_de_perte_max_quand_rien_n_a_ete_perdu():
+    """Le palier « perte max atteinte » ne doit pas mentir.
+
+    Une session arrêtée avant son premier trade annonçait
+    « 🛑 Perte max atteinte — 0.00 sur une limite de -10.00 ». Recevoir cette
+    notification sans avoir tradé ni perdu un centime détruit la confiance
+    dans toutes les autres alertes.
+    """
+    from app.milestones import MilestoneTracker
+
+    client = FakeClient([], balance=1000.0)
+    mgr = SessionManager(client, make_settings())
+    session = asyncio.run(mgr.start(
+        instrument="EUR_USD", risk_pct=0.01, objective_amount=20.0,
+        max_loss_amount=50.0, reward_ratio=1.5,
+    ))
+    # Force l'arrêt « avant le trade de trop » avec un P/L intact.
+    session.realized_pl = 0.0
+    session.tracker = MilestoneTracker(objective_amount=20.0, max_loss_amount=50.0)
+    session.milestones.clear()
+    mgr._finish(session, "max_loss_would_be_exceeded")
+
+    mensonges = [m for m in session.milestones
+                 if m.kind == "loss" and m.threshold >= 1.0]
+    assert not mensonges, (
+        f"palier de perte max émis avec un P/L de {session.realized_pl} : "
+        f"{[m.title for m in mensonges]}"
+    )
+    # La fin doit tout de même être signalée : silence interdit.
+    assert session.milestones, "la fin de session n'a été signalée par rien"
+    print(f"  P/L nul -> pas d'alerte de perte, mais fin signalée : "
+          f"« {session.milestones[-1].title} »")
+
+
+def test_le_palier_de_perte_part_toujours_quand_la_perte_est_reelle():
+    """Contrepartie du test précédent : le vrai cas doit continuer de marcher.
+
+    Le garde-fou arrête la session à −19,97 sur −20,00, donc le seuil des
+    100 % n'est jamais franchi par le P/L lui-même. Le palier doit être émis
+    explicitement, sinon la perte max est atteinte en silence.
+    """
+    session, _ = asyncio.run(
+        run_session(["loss"] * 50, max_loss=20.0, objective=20.0)
+    )
+    assert session.realized_pl < 0, session.realized_pl
+    finaux = [m for m in session.milestones
+              if m.kind == "loss" and m.threshold >= 1.0]
+    assert finaux, (
+        f"perte réelle de {session.realized_pl:.2f} sans palier 100 % : "
+        f"{[m.title for m in session.milestones]}"
+    )
+    print(f"  perte réelle {session.realized_pl:+.2f} -> « {finaux[-1].title} »")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

@@ -484,28 +484,86 @@ instruments et plusieurs jours, avant d'envisager le `live`.
 
 Le backend tourne en continu (localement pour commencer, puis sur un petit serveur) pour interroger l'API OANDA sans dépendre de l'app ouverte sur ton téléphone.
 
-## Démarrage — backend
+## Où est l'application ?
+
+Un seul processus sert **tout** : l'API et la page. `app/main.py` monte
+`frontend/` en fichiers statiques à la racine, après toutes les routes `/api`.
+Deux raisons, et la seconde est la vraie :
+
+- une seule origine, donc **aucun CORS** à régler — et c'est un réglage CORS
+  (`allow_methods=["GET"]` avec un endpoint en POST) qui avait déjà bloqué
+  tous les envois d'ordres ;
+- une seule URL. Sur un téléphone, « ouvrir l'app » doit être un lien, pas un
+  serveur à lancer à la main.
 
 ```bash
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # puis renseigne OANDA_API_KEY et OANDA_ACCOUNT_ID (compte démo)
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+cp .env.example .env          # puis renseigne SAXO_ACCESS_TOKEN
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Vérifie que ça répond : `curl http://localhost:8000/health`
+Puis `http://localhost:8000` — l'app, pas seulement l'API. Depuis un téléphone
+sur le même Wi-Fi, remplace `localhost` par l'IP de la machine.
 
-Récupère ta clé API démo ici : https://www.oanda.com/demo-account/tpa/personal_token (crée d'abord un compte démo gratuit sur oanda.com si tu n'en as pas).
+### Sur l'écran d'accueil de l'iPhone
 
-## Démarrage — frontend (PWA)
+Safari → Partager → **Sur l'écran d'accueil**. La page devient une icône et
+s'ouvre en plein écran (`display: standalone` dans le manifeste). Cette étape
+n'est pas cosmétique : **iOS n'autorise les notifications push que pour une
+page installée sur l'écran d'accueil**. Sans elle, les paliers 25/50/75/100 %
+ne peuvent pas arriver sur le téléphone.
+
+### Mise en ligne
+
+Le `Dockerfile` à la racine construit l'ensemble — un seul conteneur, prêt pour
+n'importe quel hébergeur qui impose son port par la variable `PORT` (Render,
+Fly, Railway, Scaleway…).
 
 ```bash
-cd frontend
-python3 -m http.server 5173
+docker build -t bot-trading .
+docker run -p 8000:8000 --env-file backend/.env bot-trading
 ```
 
-Ouvre `http://localhost:5173` sur ton téléphone (même réseau Wi-Fi que ton ordinateur), ou déploie `frontend/` sur un hébergeur statique (Netlify, Vercel, GitHub Pages) pour y accéder de partout. Pense à changer `API_BASE` dans `app.js` (ou définir `window.API_BASE`) pour pointer vers ton backend déployé.
+⚠️ L'image n'a **pas** pu être construite ici (pas de démon Docker dans
+l'environnement où ce code a été écrit) : les chemins des `COPY` sont vérifiés,
+et la commande de lancement est celle qui tourne en local, mais la
+construction elle-même reste à valider chez toi.
+
+Un seul worker, volontairement : l'état des sessions vit en mémoire dans le
+`SessionManager`. Avec plusieurs workers, chaque requête tomberait sur un
+processus différent et la session « active » apparaîtrait puis disparaîtrait
+au hasard du routage. Rendre l'état partagé (Redis, base) est le prix à payer
+pour passer à l'échelle — inutile pour un utilisateur unique.
+
+⚠️ Deux points avant de mettre en ligne un bot qui peut trader :
+
+- **Le jeton Saxo du portail développeur expire au bout de 24 h.** Un bot censé
+  tourner en continu a besoin d'une application OAuth enregistrée, pas de ce
+  jeton. En l'état, il faut le renouveler chaque jour.
+- **L'URL ne demande aucun mot de passe.** Tant que `LIVE_TRADING_CONFIRMED`
+  vaut `false`, aucun ordre ne part. Avant de le passer à `true` sur une URL
+  publique, il faut une authentification — sinon n'importe qui connaissant
+  l'adresse peut lancer une session sur ton compte.
+
+## Ce que vérifient les tests du front
+
+Le front n'a pas de compilateur : une faute de nom n'y produit aucune erreur,
+juste un « undefined » à l'écran ou un bouton qui ne fait rien. Trois bugs de
+ce genre ont vécu dans ce dépôt, tous muets :
+
+| Bug | Symptôme | Durée de vie |
+|---|---|---|
+| `t.currentUnits`, `t.unrealizedPL` (noms camelCase d'OANDA) | « undefined unités » dans les positions | depuis la refonte courtier |
+| `export` dans `push.js`, chargé en script classique | bouton de notifications inerte, tout le fichier ignoré | depuis l'origine |
+| `m.threshold` au lieu de `m.percent`, `m.direction` au lieu de `m.kind` | paliers affichés « 0.25 % », pastilles sans couleur | découvert en pilotant l'app |
+
+`tests/test_frontend.py` relie donc les trois fichiers entre eux et à l'API :
+chaque `id` lu existe dans le HTML (et réciproquement, sinon c'est du code
+mort), chaque champ lu sur une réponse existe dans le dataclass correspondant,
+chaque URL appelée correspond à une route, et aucun script classique ne
+contient d'`export`.
 
 ## Ce que fait le scanner (Phase 1)
 

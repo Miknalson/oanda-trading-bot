@@ -105,48 +105,137 @@ button:active { opacity: 0.8; }
 .results li.clickable { cursor: pointer; }
 .results li.empty { color: var(--muted); justify-content: center; }
 
-.suggestion, #positions-panel {
-  margin-top: 1.5rem;
-  padding-top: 1.5rem;
-  border-top: 1px solid var(--border);
+/* ---------------------------------------------------------------- cartes */
+.card {
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
 }
 
-.suggestion h2, #positions-panel h2 { font-size: 1rem; margin-bottom: 0.75rem; }
+.card h2 { font-size: 1rem; margin: 0 0 0.75rem; }
 
-.field-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
+.card.live { border-color: var(--accent); }
+
+.account-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.3rem 0;
 }
 
-.field-row label {
+.account-row .label { color: var(--muted); font-size: 0.85rem; }
+.account-row .value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.hint { color: var(--muted); font-size: 0.75rem; line-height: 1.45; margin: 0.5rem 0 0; }
+
+/* ------------------------------------------------------------ formulaire */
+.field {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
-  font-size: 0.8rem;
-  color: var(--muted);
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+  color: var(--text);
 }
 
-.field-row input {
+.field input, .field select {
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 0.5rem;
-  padding: 0.5rem;
-  font-size: 0.9rem;
+  padding: 0.65rem;
+  font-size: 1rem; /* 16px : en dessous, iOS zoome à la saisie */
+  width: 100%;
 }
 
-.suggestion-result {
+.field input:placeholder-shown { border-color: var(--danger); }
+.field-hint { color: var(--muted); font-size: 0.75rem; line-height: 1.4; }
+
+.preview {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 0.75rem;
   padding: 1rem;
-  margin-top: 1rem;
+  margin: 0.75rem 0;
 }
 
-.suggestion-result p { margin: 0.3rem 0; font-size: 0.9rem; }
-.suggestion-result .rationale { color: var(--muted); font-size: 0.8rem; }
+.preview p { margin: 0.3rem 0; font-size: 0.9rem; }
+.preview .rationale { color: var(--muted); font-size: 0.8rem; }
+
+/* --------------------------------------------------------- suivi direct */
+.live-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.pl { font-size: 1.6rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.pl.up, .vol.up { color: var(--accent); }
+.pl.down, .vol.down { color: var(--danger); }
+
+.badge.running { color: var(--accent); border-color: var(--accent); }
+.badge.done { color: var(--muted); }
+.badge.error { color: var(--danger); border-color: var(--danger); }
+
+.progress-block { margin-bottom: 1rem; }
+
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.bar {
+  height: 0.6rem;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.fill {
+  height: 100%;
+  width: 0;
+  transition: width 0.4s ease;
+}
+
+.fill.gain { background: var(--accent); }
+.fill.loss { background: var(--danger); }
+
+.progress-sub {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 0.3rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.milestones { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.75rem 0; }
+
+.chip {
+  font-size: 0.7rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.chip.gain { color: var(--accent); border-color: var(--accent); }
+.chip.loss { color: var(--danger); border-color: var(--danger); }
+
+button.danger {
+  width: 100%;
+  background: transparent;
+  color: var(--danger);
+  border-color: var(--danger);
+  font-weight: 700;
+  padding: 0.8rem;
+}
 
 button.launch {
   width: 100%;

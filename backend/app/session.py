@@ -184,6 +184,22 @@ class SessionManager:
                 f"({self.settings.max_session_loss_pct:.0%} du solde de {balance:.2f})."
             )
 
+        # Un trade risque `risk_pct` du solde. S'il risque à lui seul plus que
+        # la perte max de TOUTE la session, aucun trade ne peut jamais être
+        # ouvert : la session démarrerait pour s'arrêter aussitôt, sans avoir
+        # rien fait. Le dire ici, avec les deux nombres et les deux issues,
+        # plutôt que de laisser l'utilisateur face à un arrêt immédiat
+        # inexplicable.
+        risk_per_trade = balance * risk_pct
+        if risk_per_trade > max_loss_amount:
+            raise SessionError(
+                f"Chaque trade risque {risk_per_trade:.2f} ({risk_pct:.1%} du solde "
+                f"de {balance:.2f}), soit plus que la perte max de la session "
+                f"({max_loss_amount:.2f}) : aucun trade ne pourrait être ouvert. "
+                f"Baisse le risque par trade à {max_loss_amount / balance:.2%} "
+                f"au maximum, ou monte la perte max à {risk_per_trade:.2f}."
+            )
+
         session = TradingSession(
             id=str(uuid.uuid4()),
             instrument=instrument,
@@ -226,7 +242,14 @@ class SessionManager:
         if self._active_id == session.id:
             self._active_id = None
 
-        if session.tracker is not None and reason in self._LOSS_STOP_REASONS:
+        # Le palier « 100% de la perte max » existe pour le cas réel où le
+        # garde-fou arrête la session à −9,97 sur −10,00 : sans lui, le palier
+        # ne serait jamais franchi. Mais il ne doit PAS partir quand rien n'a
+        # été perdu — une session arrêtée avant son premier trade annonçait
+        # « 🛑 Perte max atteinte — 0.00 sur une limite de -10.00 », ce qui est
+        # faux et alarmant.
+        perte_reelle = session.realized_pl < 0
+        if session.tracker is not None and perte_reelle and reason in self._LOSS_STOP_REASONS:
             final = session.tracker.force_final("loss", session.realized_pl)
             if final is not None:
                 session.milestones.append(final)
@@ -263,8 +286,13 @@ class SessionManager:
                 # Dernière vérification avant d'engager de l'argent : est-ce
                 # que perdre ce trade ferait dépasser la perte max ? Si oui,
                 # on ne l'ouvre pas — on s'arrête proprement avant.
+                # Comparaison STRICTE : un trade dont la perte atterrirait
+                # exactement sur la limite reste dans ce que l'utilisateur a
+                # accepté — c'est une « perte maximale acceptée », pas une
+                # valeur interdite. Avec `<=`, un risque par trade égal à la
+                # perte max rendait la toute première entrée impossible.
                 worst_case = session.realized_pl - suggestion.risk_amount
-                if worst_case <= -session.max_loss_amount:
+                if worst_case < -session.max_loss_amount:
                     self._finish(session, "max_loss_would_be_exceeded")
                     return
 
