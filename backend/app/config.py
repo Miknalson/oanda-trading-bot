@@ -58,6 +58,16 @@ class Settings:
     vapid_private_key: str
     vapid_public_key: str
     vapid_claim_email: str
+    # Taille minimale d'ordre imposée par le courtier, en unités. 0 = désactivé.
+    #
+    # Valeur par défaut plutôt que champ obligatoire : sans elle, ajouter un
+    # réglage casse tout code qui construit Settings en listant ses champs.
+    #
+    # Désactivé par défaut parce que la valeur réelle de Saxo n'a pas pu être
+    # vérifiée ici. Elle protège d'un piège concret des petits comptes :
+    # respecter un minimum de 10 000 unités avec 100 € de capital revient à
+    # risquer 12 € par trade, soit 12 % du compte — six fois le plafond.
+    min_trade_units: int = 0
 
     @property
     def is_live(self) -> bool:
@@ -88,6 +98,7 @@ def get_settings() -> Settings:
         max_trades_per_session=int(os.environ.get("MAX_TRADES_PER_SESSION", "20")),
         session_poll_seconds=float(os.environ.get("SESSION_POLL_SECONDS", "5")),
         max_spread_ratio=float(os.environ.get("MAX_SPREAD_RATIO", "0.15")),
+        min_trade_units=int(os.environ.get("MIN_TRADE_UNITS", "0")),
         vapid_private_key=os.environ.get("VAPID_PRIVATE_KEY", ""),
         vapid_public_key=os.environ.get("VAPID_PUBLIC_KEY", ""),
         vapid_claim_email=os.environ.get("VAPID_CLAIM_EMAIL", ""),

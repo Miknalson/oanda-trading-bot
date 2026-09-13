@@ -16,13 +16,15 @@ BALANCE = 250.0
 class PricedClient:
     """Faux OANDA avec un spread contrôlable et un ATR connu."""
 
-    def __init__(self, spread: float, atr_target: float = 0.0006, mid: float = 1.1000) -> None:
+    def __init__(self, spread: float, atr_target: float = 0.0006, mid: float = 1.1000,
+                 balance: float = BALANCE) -> None:
         self.spread = spread
         self.atr_target = atr_target
         self.mid = mid
+        self.balance = balance
 
     async def get_account_summary(self):
-        return AccountSummary(balance=BALANCE, currency="EUR")
+        return AccountSummary(balance=self.balance, currency="EUR")
 
     async def get_candles(self, instrument, granularity="M15", count=100):
         # Hausse régulière (tendance "buy") + amplitude constante => ATR connu.
@@ -148,3 +150,59 @@ if __name__ == "__main__":
             print(f"  ❌ ÉCHEC: {exc}")
     print(f"\n{len(tests) - failed}/{len(tests)} tests passés")
     sys.exit(1 if failed else 0)
+
+
+def test_un_petit_compte_est_refuse_avant_d_exploser_le_plafond_de_risque():
+    """Le piège des petits comptes : le minimum du courtier dicte le risque.
+
+    Avec 100 € de capital et un minimum de 10 000 unités, une seule perte vaut
+    12 € — 12 % du compte, six fois le plafond de sécurité. Le pourcentage de
+    risque demandé n'y peut rien : c'est la taille minimale qui décide. Mieux
+    vaut refuser en l'expliquant que laisser le courtier rejeter l'ordre sans
+    raison lisible, ou pire, ouvrir une position hors de toute limite.
+    """
+    import asyncio
+
+    from app.analysis import TradeAnalyzer
+    from app.broker import BrokerError
+
+    client = PricedClient(spread=0.00012, balance=100.0)
+
+    try:
+        asyncio.run(TradeAnalyzer(client).suggest(
+            instrument="EUR_USD", risk_pct=0.01, objective_amount=20.0,
+            reward_ratio=1.5, min_trade_units=10_000,
+        ))
+        raise AssertionError("un compte de 100 € a été accepté avec un minimum de 10 000")
+    except BrokerError as exc:
+        message = str(exc)
+
+    assert "minimum du courtier" in message, message
+    assert "10000" in message or "10 000" in message, message
+    print(f"  100 € / minimum 10 000 -> refusé : « {message[:70]}… »")
+
+
+def test_le_garde_fou_est_desactive_par_defaut():
+    """Une contrainte non vérifiée ne doit pas bloquer de trades valides.
+
+    La taille minimale réelle de Saxo n'a pas pu être confirmée. Livrer 1000
+    par défaut refuserait des trades légitimes chez un courtier plus permissif
+    — un faux positif coûte plus cher ici qu'un faux négatif, puisque sans le
+    réglage c'est le courtier lui-même qui refusera l'ordre.
+    """
+    import asyncio
+
+    from app.analysis import TradeAnalyzer
+    from app.config import Settings
+
+    assert Settings.min_trade_units == 0, (
+        f"défaut à {Settings.min_trade_units} : contrainte non vérifiée imposée"
+    )
+
+    client = PricedClient(spread=0.00012, balance=100.0)
+    suggestion = asyncio.run(TradeAnalyzer(client).suggest(
+        instrument="EUR_USD", risk_pct=0.01, objective_amount=20.0,
+        reward_ratio=1.5,
+    ))
+    assert suggestion.suggested_units != 0
+    print(f"  défaut désactivé -> {abs(suggestion.suggested_units)} unités acceptées")

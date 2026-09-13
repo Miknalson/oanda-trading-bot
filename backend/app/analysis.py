@@ -67,6 +67,7 @@ class TradeAnalyzer:
         max_risk_pct: float = 0.02,
         reward_ratio: float | None = None,
         max_spread_ratio: float = 0.15,
+        min_trade_units: int = 0,
     ) -> TradeSuggestion:
         """Construit une proposition de trade.
 
@@ -134,6 +135,32 @@ class TradeAnalyzer:
             raise BrokerError(
                 "Le montant à risquer est trop faible pour ouvrir une position "
                 "(taille calculée = 0 unité). Augmente risk_pct ou ton solde."
+            )
+
+        # Les courtiers imposent une taille minimale (souvent 1 000 unités sur
+        # le Forex, parfois 10 000). En dessous, l'ordre est refusé.
+        #
+        # Le piège est que la seule façon de respecter ce minimum avec un petit
+        # compte est de risquer BEAUCOUP plus que le pourcentage demandé : avec
+        # 100 € et un minimum de 10 000 unités, une seule perte vaut 12 € — soit
+        # 12 % du compte, six fois le plafond de sécurité. Mieux vaut refuser en
+        # expliquant que laisser le courtier rejeter l'ordre sans raison lisible,
+        # ou pire, ouvrir une position hors de toute limite de risque.
+        # Désactivé par défaut (0) : la taille minimale réelle de Saxo n'a pas
+        # pu être vérifiée depuis l'environnement où ce code a été écrit, et
+        # livrer une contrainte devinée qui REFUSE des trades valides serait
+        # pire que le problème qu'elle prétend éviter. À activer via
+        # MIN_TRADE_UNITS une fois la valeur de ton courtier connue.
+        if min_trade_units > 0 and sizing.units < min_trade_units:
+            solde_requis = min_trade_units * stop_distance / risk_pct
+            raise BrokerError(
+                f"Taille calculée : {sizing.units} unités, sous le minimum du "
+                f"courtier ({min_trade_units}). Ton compte est trop petit pour "
+                f"risquer {risk_pct:.1%} par trade sur cet instrument : "
+                f"respecter le minimum reviendrait à risquer "
+                f"{min_trade_units * stop_distance:.2f} de ta devise par trade. "
+                f"Il faudrait environ {solde_requis:.0f} de solde à ce niveau de "
+                f"risque, ou un instrument dont le stop est plus large."
             )
 
         if reward_ratio is not None:
