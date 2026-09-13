@@ -56,7 +56,12 @@ async function loadHealthAndLimits() {
 
   try {
     const limits = await api("/api/limits");
+    // Afficher le courtier configuré. Sans ça, une clé manquante se lit comme
+    // un problème de clé, alors que la vraie question est souvent « pourquoi
+    // ce courtier-là ? » — BROKER resté sur une ancienne valeur dans .env.
     el["limits"].textContent =
+      `Courtier : ${limits.broker.toUpperCase()}` +
+      `${limits.is_live ? " (LIVE — argent réel)" : " (simulation)"}. ` +
       `Plafonds serveur : ${(limits.max_risk_pct * 100).toFixed(1)} % par trade, ` +
       `${(limits.max_session_loss_pct * 100).toFixed(0)} % du solde par session, ` +
       `${limits.max_trades_per_session} trades max. ` +

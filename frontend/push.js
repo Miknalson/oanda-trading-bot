@@ -41,7 +41,15 @@ async function enablePushNotifications() {
     );
   }
 
-  const config = await fetch(`${PUSH_API_BASE}/api/notifications/config`).then((r) => r.json());
+  // Une erreur serveur renvoie « Internal Server Error » en texte brut, pas
+  // du JSON. Appeler .json() dessus lève « Unexpected token 'I' », un message
+  // qui ne dit rien de la cause et qu'on ne peut pas relier au problème réel.
+  const reponse = await fetch(`${PUSH_API_BASE}/api/notifications/config`);
+  if (!reponse.ok) {
+    const texte = (await reponse.text()).slice(0, 200);
+    throw new Error(`Le serveur a répondu ${reponse.status} : ${texte}`);
+  }
+  const config = await reponse.json();
   if (!config.push_enabled || !config.vapid_public_key) {
     throw new Error(
       "Le serveur n'a pas de clés VAPID configurées — voir la section " +

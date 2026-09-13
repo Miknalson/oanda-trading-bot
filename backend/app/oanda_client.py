@@ -34,8 +34,11 @@ class OandaClient:
         self.settings = settings or get_settings()
         if not self.settings.oanda_api_key:
             raise OandaError(
-                "OANDA_API_KEY manquant. Copie backend/.env.example en backend/.env "
-                "et renseigne ta clé API."
+                "OANDA_API_KEY manquant, et BROKER=oanda est actif dans "
+                "backend/.env. Si tu voulais utiliser Saxo — le seul courtier "
+                "étudié qui donne accès à son API sans compte réel — mets "
+                "BROKER=saxo et renseigne SAXO_ACCESS_TOKEN. Sinon, renseigne "
+                "ta clé OANDA : https://www.oanda.com/account/tpa/personal_token"
             )
 
     @property

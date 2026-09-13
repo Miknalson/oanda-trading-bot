@@ -59,9 +59,10 @@ class SaxoClient:
         self.settings = settings or get_settings()
         if not self.settings.saxo_access_token:
             raise SaxoError(
-                "SAXO_ACCESS_TOKEN manquant. Crée un compte sur "
-                "https://www.developer.saxo/accounts/sim/signup, récupère le "
-                "jeton 24 h, et renseigne-le dans backend/.env."
+                "SAXO_ACCESS_TOKEN manquant, et BROKER=saxo est actif. Crée un "
+                "compte sur https://www.developer.saxo/accounts/sim/signup, "
+                "récupère le jeton (valable 24 h seulement) et renseigne-le "
+                "dans backend/.env."
             )
         # Résolus une fois à la première requête : Saxo identifie le compte
         # par des clés opaques, pas par le numéro affiché dans l'interface.

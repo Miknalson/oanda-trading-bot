@@ -313,6 +313,62 @@ def test_une_interface_absente_s_explique_au_lieu_de_faire_404():
     print("  interface absente -> route « / » qui explique, pas un 404 nu")
 
 
+def test_les_notifications_ne_dependent_pas_du_courtier():
+    """S'abonner aux notifications n'a rien à voir avec le courtier.
+
+    Les trois routes passaient par le SessionManager, qui construit le client :
+    une configuration de courtier incomplète faisait donc répondre 500 à
+    `/api/notifications/config`. Côté navigateur ça donnait « Unexpected token
+    'I' » — le début de « Internal Server Error », qui n'est pas du JSON — un
+    message sans aucun rapport avec la cause réelle.
+    """
+    import os
+
+    os.environ.setdefault("SAXO_ACCESS_TOKEN", "factice-pour-import")
+    source = (RACINE / "backend" / "app" / "main.py").read_text()
+
+    debut = source.index("async def notifications_config")
+    bloc = source[debut : source.index("@app.get(\"/api/sessions/{session_id}/milestones\")")]
+    assert "get_session_manager()" not in bloc, (
+        "une route de notification construit encore le SessionManager, donc le "
+        "courtier"
+    )
+    assert bloc.count("get_notifier()") == 3, (
+        f"{bloc.count('get_notifier()')} routes utilisent le notifieur "
+        f"indépendant, 3 attendues"
+    )
+    print("  les 3 routes de notification n'instancient plus de courtier")
+
+
+def test_une_reponse_non_json_ne_donne_pas_un_message_incomprehensible():
+    """Un 500 renvoie du texte brut : .json() dessus lève un message opaque."""
+    push = sans_commentaires(lire("push.js"))
+    app = sans_commentaires(lire("app.js"))
+
+    assert ".then((r) => r.json())" not in push, (
+        "push.js appelle encore .json() sans vérifier le statut de la réponse"
+    )
+    assert "reponse.ok" in push, "push.js ne vérifie pas le statut HTTP"
+    # app.js passe par son helper, qui neutralise déjà le cas.
+    assert "res.json().catch(() => ({}))" in app, (
+        "le helper api() ne protège plus contre une réponse non-JSON"
+    )
+    print("  réponse non-JSON : statut vérifié et texte brut rapporté tel quel")
+
+
+def test_l_app_affiche_le_courtier_configure():
+    """Une clé manquante se lit comme un problème de clé, pas de courtier.
+
+    Quand BROKER reste sur une ancienne valeur dans .env, l'app réclame la clé
+    d'un courtier auquel l'utilisateur ne pense plus. Afficher le courtier en
+    clair rend la cause visible sans lire de message d'erreur.
+    """
+    js = sans_commentaires(lire("app.js"))
+    assert "limits.broker" in js, "le courtier configuré n'est pas affiché"
+    assert "limits.is_live" in js, "le mode LIVE / simulation n'est pas affiché"
+    print("  le courtier configuré et le mode sont affichés en clair")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     echecs = 0

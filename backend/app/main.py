@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .analysis import SpreadTooWideError, TradeAnalyzer
 from .broker import Broker, BrokerError
+from .notifier import Notifier
 from .broker_factory import make_broker
 from .config import get_settings
 from .scanner import VolatilityScanner
@@ -45,6 +46,28 @@ app.add_middleware(
 _scanner: VolatilityScanner | None = None
 _client: Broker | None = None
 _sessions: SessionManager | None = None
+_notifier: Notifier | None = None
+
+
+def get_notifier() -> Notifier:
+    """Le notifieur, indépendamment de tout courtier.
+
+    S'abonner aux notifications ne nécessite aucune connexion au courtier.
+    Passer par le SessionManager pour l'obtenir construisait le client, donc
+    une configuration de courtier incomplète faisait répondre 500 à
+    `/api/notifications/config` — une erreur sans rapport avec la cause, et
+    illisible côté navigateur (« Unexpected token 'I' », le début de
+    « Internal Server Error » qui n'est pas du JSON).
+    """
+    global _notifier
+    if _notifier is None:
+        settings = get_settings()
+        _notifier = Notifier(
+            vapid_private_key=settings.vapid_private_key,
+            vapid_public_key=settings.vapid_public_key,
+            vapid_claim_email=settings.vapid_claim_email,
+        )
+    return _notifier
 
 
 def get_client() -> Broker:
@@ -57,7 +80,7 @@ def get_client() -> Broker:
 def get_session_manager() -> SessionManager:
     global _sessions
     if _sessions is None:
-        _sessions = SessionManager(get_client(), get_settings())
+        _sessions = SessionManager(get_client(), get_settings(), get_notifier())
     return _sessions
 
 
@@ -315,7 +338,7 @@ class PushSubscriptionRequest(BaseModel):
 @app.get("/api/notifications/config")
 async def notifications_config() -> dict:
     """Clé publique VAPID à utiliser par la PWA pour s'abonner."""
-    notifier = get_session_manager().notifier
+    notifier = get_notifier()
     return {
         "push_enabled": notifier.push_enabled,
         "vapid_public_key": notifier.vapid_public_key or None,
@@ -326,7 +349,7 @@ async def notifications_config() -> dict:
 
 @app.post("/api/notifications/subscribe")
 async def subscribe_push(req: PushSubscriptionRequest) -> dict:
-    notifier = get_session_manager().notifier
+    notifier = get_notifier()
     if not notifier.push_enabled:
         raise HTTPException(
             status_code=503,
@@ -346,7 +369,7 @@ async def subscribe_push(req: PushSubscriptionRequest) -> dict:
 
 @app.post("/api/notifications/unsubscribe")
 async def unsubscribe_push(req: PushSubscriptionRequest) -> dict:
-    notifier = get_session_manager().notifier
+    notifier = get_notifier()
     removed = notifier.unsubscribe(req.endpoint)
     return {"removed": removed, "subscribers": len(notifier.subscriptions)}
 
