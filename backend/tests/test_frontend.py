@@ -269,6 +269,50 @@ def test_le_contexte_non_securise_est_diagnostique_et_non_avale():
     print("  contexte non sécurisé : diagnostiqué, et avant le test de support")
 
 
+def test_une_interface_absente_s_explique_au_lieu_de_faire_404():
+    """Un 404 nu sur « / » envoie chercher du mauvais côté.
+
+    Si le dossier frontend/ manque, l'API répond, /docs s'affiche, et seule la
+    page d'accueil est introuvable. Sans message, on soupçonne le port, le
+    pare-feu ou l'adresse — alors que c'est un dossier manquant.
+    """
+    import importlib
+    import os
+    import shutil
+    import sys
+    import tempfile
+
+    os.environ.setdefault("SAXO_ACCESS_TOKEN", "factice-pour-import")
+
+    # Recharge le module avec un backend copié SANS le dossier frontend,
+    # exactement le cas d'un dépôt incomplet.
+    with tempfile.TemporaryDirectory() as tmp:
+        faux = Path(tmp) / "depot" / "backend"
+        shutil.copytree(RACINE / "backend" / "app", faux / "app")
+
+        sauvegarde = list(sys.path)
+        modules = {n: m for n, m in sys.modules.items()
+                   if n == "app" or n.startswith("app.")}
+        try:
+            for nom in modules:
+                del sys.modules[nom]
+            sys.path.insert(0, str(faux))
+            main = importlib.import_module("app.main")
+
+            assert not main.FRONTEND_DIR.is_dir(), (
+                f"le dossier ne devait pas exister : {main.FRONTEND_DIR}"
+            )
+            racines = [r for r in main.app.routes if getattr(r, "path", "") == "/"]
+            assert racines, "aucune route « / » : le 404 serait nu et muet"
+        finally:
+            sys.path[:] = sauvegarde
+            for nom in [n for n in sys.modules if n == "app" or n.startswith("app.")]:
+                del sys.modules[nom]
+            sys.modules.update(modules)
+
+    print("  interface absente -> route « / » qui explique, pas un 404 nu")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     echecs = 0

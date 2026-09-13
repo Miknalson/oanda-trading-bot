@@ -387,3 +387,20 @@ async def session_milestones(session_id: str) -> dict:
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 if FRONTEND_DIR.is_dir():
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+else:
+    # Sans ce repli, l'absence du dossier donnerait un 404 nu sur « / ».
+    # L'API répondrait, /docs s'afficherait, et rien ne dirait pourquoi la
+    # page est introuvable — on chercherait du côté du réseau ou du port
+    # alors que le problème est un dossier manquant.
+    @app.get("/", include_in_schema=False)
+    async def frontend_introuvable() -> dict:
+        return {
+            "erreur": f"Interface introuvable : {FRONTEND_DIR} n'existe pas.",
+            "cause_probable": (
+                "Le dossier frontend/ est absent, ou le backend a été copié "
+                "seul sans le reste du dépôt. L'interface est servie depuis "
+                "la racine du dépôt, un niveau au-dessus de backend/."
+            ),
+            "remede": "Récupère le dépôt complet : git clone puis git pull.",
+            "api_disponible": "/docs",
+        }
