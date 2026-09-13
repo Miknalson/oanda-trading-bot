@@ -370,8 +370,33 @@ el["enable-push"].addEventListener("click", enablePush);
 el["risk-pct"].addEventListener("input", refreshScale);
 el["max-loss-amount"].addEventListener("input", refreshScale);
 
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("service-worker.js").catch(() => {});
+// Les notifications push exigent un « contexte sécurisé » : HTTPS, ou
+// localhost. Sur http://192.168.x.x:8000 — le cas quand on ouvre l'app depuis
+// son téléphone vers un PC du même Wi-Fi — le navigateur désactive purement et
+// simplement les service workers, donc le push est impossible.
+//
+// Avaler cette erreur (`.catch(() => {})`) était le pire choix : l'app
+// annonçait ensuite « ce navigateur ne gère pas les notifications », ce qui
+// est faux. Le navigateur les gère ; c'est la connexion qui n'est pas sûre.
+function contexteSecurise() {
+  return window.isSecureContext === true;
+}
+
+if (!contexteSecurise()) {
+  el["enable-push"].disabled = true;
+  el["push-status"].textContent =
+    `Indisponible sur ${location.protocol}//${location.hostname} : les ` +
+    "notifications exigent une connexion sécurisée (HTTPS), ou l'adresse " +
+    "localhost sur la machine même. Le reste de l'app fonctionne normalement.";
+} else if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("service-worker.js").catch((err) => {
+    el["push-status"].textContent = `Service worker refusé : ${err.message}`;
+  });
+} else {
+  el["enable-push"].disabled = true;
+  el["push-status"].textContent =
+    "Ce navigateur ne gère pas les service workers. Sur iPhone, ajoute " +
+    "d'abord l'app à l'écran d'accueil (Partager → Sur l'écran d'accueil).";
 }
 
 loadHealthAndLimits();

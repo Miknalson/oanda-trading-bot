@@ -23,6 +23,17 @@ function urlBase64ToUint8Array(base64String) {
 }
 
 async function enablePushNotifications() {
+  // Distinguer les deux causes : elles appellent des actions opposées.
+  // Une connexion non sécurisée se règle côté serveur (HTTPS), pas en
+  // installant l'app sur l'écran d'accueil.
+  if (!window.isSecureContext) {
+    throw new Error(
+      `Connexion non sécurisée (${location.protocol}//${location.hostname}). ` +
+        "Les notifications exigent HTTPS, ou localhost sur la machine même. " +
+        "Un tunnel (Cloudflare Tunnel, ngrok) ou un hébergeur donne une URL " +
+        "HTTPS sans rien changer au code."
+    );
+  }
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
     throw new Error(
       "Ce navigateur ne gère pas les notifications push. Sur iPhone, ajoute " +

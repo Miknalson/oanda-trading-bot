@@ -504,8 +504,51 @@ cp .env.example .env          # puis renseigne SAXO_ACCESS_TOKEN
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Puis `http://localhost:8000` — l'app, pas seulement l'API. Depuis un téléphone
-sur le même Wi-Fi, remplace `localhost` par l'IP de la machine.
+Ou, plus simplement :
+
+```bash
+python scripts/demarrer.py
+```
+
+Ce script affiche les deux adresses et les deux pièges, puis lance le serveur.
+
+### Depuis le téléphone : les trois pièges
+
+**`localhost` ne marchera jamais depuis le téléphone.** `localhost` désigne
+*l'appareil courant* : sur un iPhone, c'est l'iPhone, où rien ne tourne. Il
+faut l'adresse IP de la machine qui héberge — `http://192.168.1.42:8000` par
+exemple. `scripts/demarrer.py` l'affiche.
+
+**`--host 0.0.0.0` est obligatoire.** Par défaut uvicorn n'écoute que sur
+127.0.0.1 et refuse toute connexion venant du réseau, même avec la bonne IP.
+Le symptôme est identique à une mauvaise adresse, d'où la confusion.
+
+**Les notifications ne marcheront pas par une IP en HTTP.** Elles exigent un
+*contexte sécurisé* : HTTPS, ou `localhost` sur la machine même. Sur
+`http://192.168.x.x`, le navigateur retire purement et simplement
+`navigator.serviceWorker`, donc le push est impossible — mesuré :
+
+| Adresse | `isSecureContext` | `serviceWorker` | Push |
+|---|---|---|---|
+| `http://127.0.0.1:8000` | `true` | présent | possible |
+| `http://192.0.2.2:8000` | `false` | **absent** | impossible |
+
+Le reste de l'app fonctionne normalement dans les deux cas : scanner,
+sessions, progression en direct. Seules les notifications tombent.
+
+L'app affiche désormais cette raison à l'écran. Avant, l'échec d'enregistrement
+était avalé (`.catch(() => {})`) et le bouton répondait « ce navigateur ne gère
+pas les notifications » — faux, et envoyant chercher la solution du mauvais
+côté : le navigateur les gère, c'est la connexion qui n'est pas sûre, et ça se
+règle côté serveur. Pour obtenir HTTPS sans rien changer au code : un tunnel
+(Cloudflare Tunnel, ngrok) vers la machine, ou un hébergeur.
+
+### Et une VM sur le PC ?
+
+Possible, mais inutile : lancer directement sur le PC fait la même chose. Si tu
+y tiens, la VM doit être en réseau **pont** (*bridged*) et non **NAT** —
+sinon elle reçoit une adresse d'un réseau privé que le téléphone ne peut pas
+joindre.
 
 ### Sur l'écran d'accueil de l'iPhone
 

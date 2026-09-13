@@ -231,6 +231,44 @@ def test_la_perte_max_n_a_pas_de_valeur_par_defaut_dans_le_formulaire():
     print("  perte max : aucun défaut, et refus de démarrer sans elle")
 
 
+def test_le_contexte_non_securise_est_diagnostique_et_non_avale():
+    """Sur http://192.168.x.x, le push est impossible — il faut le DIRE.
+
+    Les notifications exigent un contexte sécurisé (HTTPS, ou localhost). Quand
+    on ouvre l'app depuis son téléphone vers un PC du même Wi-Fi, l'adresse est
+    une IP en HTTP : le navigateur retire alors `navigator.serviceWorker`
+    entièrement.
+
+    L'ancien code faisait `.catch(() => {})` sur l'enregistrement, puis
+    annonçait « ce navigateur ne gère pas les notifications » — ce qui est faux
+    et envoie l'utilisateur chercher la solution du mauvais côté. Le navigateur
+    les gère ; c'est la connexion qui n'est pas sûre, et ça se règle côté
+    serveur.
+    """
+    app = sans_commentaires(lire("app.js"))
+    push = sans_commentaires(lire("push.js"))
+
+    assert "isSecureContext" in app, (
+        "app.js ne distingue pas un contexte non sécurisé"
+    )
+    assert "isSecureContext" in push, (
+        "push.js ne distingue pas un contexte non sécurisé"
+    )
+    assert ".catch(() => {})" not in app, (
+        "un échec d'enregistrement du service worker est encore avalé en silence"
+    )
+    # Le message doit nommer HTTPS, la vraie cause.
+    assert "HTTPS" in app, "le message n'explique pas qu'il faut HTTPS"
+
+    # Et le diagnostic « non sécurisé » doit passer AVANT celui du support
+    # navigateur, sinon c'est le mauvais message qui sort.
+    assert push.index("isSecureContext") < push.index('"serviceWorker" in navigator'), (
+        "push.js teste le support du navigateur avant la sécurité du contexte : "
+        "le message trompeur sortirait en premier"
+    )
+    print("  contexte non sécurisé : diagnostiqué, et avant le test de support")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     echecs = 0
