@@ -52,6 +52,7 @@ import argparse
 import asyncio
 import logging
 import math
+import random
 from dataclasses import dataclass, field
 
 from .analysis import ATR_STOP_MULTIPLIER
@@ -145,6 +146,7 @@ class BacktestResult:
     instrument: str
     granularity: str
     candles: int
+    entry_mode: str = "signal"
     trades: list[BacktestTrade] = field(default_factory=list)
     spread: float = 0.0
     reward_ratio: float = 1.5
@@ -354,13 +356,30 @@ def run_backtest(
     risk_amount: float = 2.50,
     financing_rate_annual: float = 0.02,
     max_spread_ratio: float = MAX_SPREAD_RATIO,
+    entry_mode: str = "signal",
+    seed: int = 0,
 ) -> BacktestResult:
     """Rejoue la stratégie bougie par bougie, sans regard vers le futur.
 
     `financing_rate_annual` : coût annuel de détention en fraction du
     notionnel (2 % par défaut, ordre de grandeur courant sur une paire
     majeure). Mets 0 pour isoler l'effet du seul spread.
+
+    `entry_mode` :
+
+    - `"signal"` : le sens du trade vient de `trend_direction` — la stratégie.
+    - `"random"` : le sens est tiré à pile ou face, tout le reste identique.
+
+    Le mode aléatoire est l'étalon de mesure, et il manquait. Sans lui, un
+    backtest dit seulement « ça perd » ; il ne dit pas si le SIGNAL y est pour
+    quelque chose. Comparer les deux sur les MÊMES bougies, avec les mêmes
+    stops, le même dimensionnement et les mêmes frais, isole exactement ce
+    qu'apporte la logique d'entrée. Si les deux donnent la même chose, le
+    signal ne vaut rien — et le régler davantage ne servira à rien.
     """
+    if entry_mode not in ("signal", "random"):
+        raise ValueError(f"entry_mode inconnu : {entry_mode!r} (signal ou random)")
+    tirage = random.Random(seed)
     result = BacktestResult(
         instrument=instrument,
         granularity=granularity,
@@ -370,6 +389,7 @@ def run_backtest(
         risk_amount=risk_amount,
         financing_rate_annual=financing_rate_annual,
         max_spread_ratio=max_spread_ratio,
+        entry_mode=entry_mode,
     )
 
     bar_hours = GRANULARITY_HOURS.get(granularity, 1.0)
@@ -443,6 +463,19 @@ def run_backtest(
         if direction is None or not atr_value or atr_value <= 0:
             result.skipped_no_signal += 1
             continue
+
+        # En mode aléatoire, seule la RÈGLE de direction change : mêmes
+        # bougies, même filtre de spread, même dimensionnement, mêmes stops.
+        #
+        # Les instants d'entrée ne restent pas identiques pour autant, et ils
+        # ne le peuvent pas : dès qu'un trade se dénoue différemment, la
+        # position se libère à un autre moment et l'entrée suivante se décale.
+        # Seule la première entrée est commune. La comparaison reste valide —
+        # deux règles de direction jugées sur le même historique avec les
+        # mêmes frais — mais ce n'est pas une expérience appariée trade à
+        # trade, et il ne faut pas la lire comme telle.
+        if entry_mode == "random":
+            direction = "buy" if tirage.random() < 0.5 else "sell"
 
         stop_distance = atr_value * ATR_STOP_MULTIPLIER
         if spread / stop_distance > max_spread_ratio:  # même refus qu'en production

@@ -225,6 +225,60 @@ for libelle, r in resultats:
     print(f"\\n--- spread {libelle} ---")
     print(r.summary())"""),
 
+md("""## 4 bis. Le signal vaut-il mieux que pile ou face ?
+
+Un backtest qui perd ne dit pas **pourquoi**. Deux causes très différentes
+donnent le même résultat négatif : une stratégie qui a un avantage mais que
+les frais annulent, ou une stratégie qui n'a aucun avantage du tout.
+
+On les sépare en rejouant les mêmes bougies avec une entrée **tirée au sort**,
+tout le reste identique — mêmes instants d'analyse, mêmes stops, mêmes frais.
+Seule la règle de direction change.
+
+- Si la stratégie fait nettement mieux que le hasard : il y a un avantage, et
+  le combat est contre les frais.
+- Si elle fait pareil : le signal ne vaut rien, et le régler ne changera rien.
+- Si elle fait pire : le signal est activement nuisible.
+"""),
+code("""SPREAD_TEST = SPREADS.get("1,2 pip (courant)", 0.00012)
+TIRAGES = 5   # plusieurs graines : un seul tirage serait lui-même du hasard
+
+print(f"{'Interv.':<9}{'Stratégie':>11}{'Hasard (moy.)':>15}{'Écart':>9}"
+      f"{'P/L strat.':>12}{'P/L hasard':>12}")
+print("-" * 68)
+
+for g in INTERVALLES:
+    strat = run_backtest(
+        historique[g], instrument=INSTRUMENT, granularity=g,
+        spread=SPREAD_TEST, reward_ratio=1.5, risk_amount=2.5,
+        financing_rate_annual=0.02,
+    )
+    if not strat.closed:
+        print(f"{g:<9}{'aucun trade':>11}")
+        continue
+
+    tirages = [
+        run_backtest(
+            historique[g], instrument=INSTRUMENT, granularity=g,
+            spread=SPREAD_TEST, reward_ratio=1.5, risk_amount=2.5,
+            financing_rate_annual=0.02, entry_mode="random", seed=graine,
+        )
+        for graine in range(TIRAGES)
+    ]
+    taux_hasard = sum(t.win_rate for t in tirages) / TIRAGES
+    pl_hasard = sum(t.net_pl for t in tirages) / TIRAGES
+    ecart = strat.win_rate - taux_hasard
+
+    print(f"{g:<9}{strat.win_rate:>10.1%}{taux_hasard:>15.1%}{ecart:>+9.1%}"
+          f"{strat.net_pl:>+12.2f}{pl_hasard:>+12.2f}")
+
+    if ecart > 0.02:
+        print(f"         -> le signal apporte quelque chose sur {g}")
+    elif ecart < -0.02:
+        print(f"         -> le signal fait PIRE que pile ou face sur {g}")
+    else:
+        print(f"         -> indiscernable du hasard sur {g} : le signal ne vaut rien")"""),
+
 md("""## 5. Le verdict
 
 Une lecture directe, sans enrobage — mais **prudente sur trois points** qui

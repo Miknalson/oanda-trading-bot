@@ -595,3 +595,101 @@ def test_backtest_spread_ceiling_matches_production():
         f"backtest {MAX_SPREAD_RATIO} != production {production}"
     )
     print(f"  plafond de spread aligné : {MAX_SPREAD_RATIO:.0%} des deux côtés")
+
+
+def test_l_entree_aleatoire_est_reproductible():
+    """Même graine, même résultat — sinon la comparaison n'est pas honnête."""
+    candles = random_walk(2000, seed=31)
+    a = run_backtest(candles, spread=0.00008, entry_mode="random", seed=7)
+    b = run_backtest(candles, spread=0.00008, entry_mode="random", seed=7)
+    c = run_backtest(candles, spread=0.00008, entry_mode="random", seed=8)
+
+    assert [t.direction for t in a.trades] == [t.direction for t in b.trades]
+    assert [t.direction for t in a.trades] != [t.direction for t in c.trades], (
+        "deux graines différentes donnent les mêmes tirages"
+    )
+    print(f"  graine 7 reproductible, graine 8 différente ({len(a.trades)} trades)")
+
+
+def test_l_etalon_aleatoire_ne_change_que_la_regle_de_direction():
+    """Seule la règle de direction doit différer — pas le terrain de jeu.
+
+    Les instants d'entrée ne restent PAS identiques, et ils ne le peuvent
+    pas : dès qu'un trade se dénoue différemment, la position se libère à un
+    autre moment et l'entrée suivante se décale. Seule la première entrée est
+    commune. Ce qui doit rester identique, c'est le reste : mêmes bougies,
+    même filtre de spread, même dimensionnement.
+    """
+    candles = random_walk(2000, seed=33)
+    signal = run_backtest(candles, spread=0.00008, entry_mode="signal")
+    hasard = run_backtest(candles, spread=0.00008, entry_mode="random", seed=3)
+
+    assert signal.trades and hasard.trades
+    assert signal.trades[0].entry_index == hasard.trades[0].entry_index, (
+        "la première entrée diffère : ce n'est plus le même point de départ"
+    )
+    assert signal.candles == hasard.candles
+    assert signal.risk_amount == hasard.risk_amount
+    assert signal.max_spread_ratio == hasard.max_spread_ratio
+    assert all(t.units > 0 for t in hasard.trades)
+
+    # Les deux doivent trader dans le même ordre de grandeur, sinon on
+    # comparerait une stratégie active à une stratégie quasi absente.
+    ecart = abs(len(signal.trades) - len(hasard.trades)) / len(signal.trades)
+    assert ecart < 0.35, (
+        f"{len(signal.trades)} trades avec signal contre {len(hasard.trades)} "
+        f"au hasard : volumes trop différents pour comparer"
+    )
+    print(
+        f"  même départ et mêmes règles de coût ; {len(signal.trades)} contre "
+        f"{len(hasard.trades)} trades ({ecart:.0%} d'écart de volume)"
+    )
+
+
+def test_sur_une_vraie_tendance_le_signal_bat_le_hasard():
+    """Contrôle positif : l'étalon doit savoir détecter un signal QUI MARCHE.
+
+    Sans ce test, un étalon cassé — qui renverrait toujours « pas de
+    différence » — ferait conclure à tort qu'aucune stratégie ne vaut rien.
+    """
+    candles = steady_uptrend(3000)
+    signal = run_backtest(candles, spread=0.0, entry_mode="signal",
+                          financing_rate_annual=0.0)
+    hasard = run_backtest(candles, spread=0.0, entry_mode="random", seed=5,
+                          financing_rate_annual=0.0)
+
+    assert signal.win_rate > hasard.win_rate + 0.20, (
+        f"signal {signal.win_rate:.1%} contre hasard {hasard.win_rate:.1%} : "
+        f"l'étalon ne distingue pas une tendance franche"
+    )
+    assert signal.net_pl > hasard.net_pl
+    print(
+        f"  hausse franche : signal {signal.win_rate:.1%} contre hasard "
+        f"{hasard.win_rate:.1%} -> l'étalon détecte bien un vrai avantage"
+    )
+
+
+def test_sur_une_marche_aleatoire_le_signal_ne_bat_pas_le_hasard():
+    """Contrôle négatif : sans avantage exploitable, les deux se valent.
+
+    C'est la mesure qui compte pour le verdict réel : si la stratégie fait
+    comme le hasard sur les vraies données, le signal n'apporte rien et le
+    régler davantage ne changera rien.
+    """
+    candles = random_walk(5000, seed=41)
+    signal = run_backtest(candles, spread=0.00008, financing_rate_annual=0.0)
+    tirages = [
+        run_backtest(candles, spread=0.00008, entry_mode="random", seed=g,
+                     financing_rate_annual=0.0)
+        for g in range(5)
+    ]
+    moyenne = sum(t.win_rate for t in tirages) / len(tirages)
+
+    assert abs(signal.win_rate - moyenne) < 0.05, (
+        f"signal {signal.win_rate:.1%} contre {moyenne:.1%} au hasard : écart "
+        f"inattendu sur des données sans tendance exploitable"
+    )
+    print(
+        f"  marche aléatoire : signal {signal.win_rate:.1%} contre "
+        f"{moyenne:.1%} au hasard (5 tirages) -> aucun avantage, comme attendu"
+    )

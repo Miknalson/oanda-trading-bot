@@ -19,6 +19,21 @@ def cellules_de_code() -> list[str]:
     return ["".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
 
 
+def cellule_contenant(*marqueurs: str) -> str:
+    """Retrouve une cellule par son CONTENU, jamais par sa position.
+
+    Repérer par index (`[-2]`, `[-1]`) casse dès qu'on insère une cellule
+    ailleurs dans le carnet — ce qui est arrivé en ajoutant la comparaison au
+    hasard entre le backtest et le verdict.
+    """
+    trouvees = [c for c in cellules_de_code()
+                if all(m in c for m in marqueurs)]
+    assert len(trouvees) == 1, (
+        f"{len(trouvees)} cellules contiennent {marqueurs} — marqueur à revoir"
+    )
+    return trouvees[0]
+
+
 def code_seul(cellule: str) -> str:
     """Retire les commentaires : seul ce qui s'exécute compte."""
     return "\n".join(
@@ -202,7 +217,7 @@ def test_le_spread_marche_ferme_n_est_jamais_utilise():
     """
     import ast
 
-    cellule = code_seul(cellules_de_code()[-2])
+    cellule = code_seul(cellule_contenant("SPREADS", "cours.tradeable"))
     assert "cours.tradeable" in cellule, (
         "la cellule de backtest ne vérifie pas si le marché est ouvert"
     )
@@ -314,12 +329,15 @@ def test_les_cellules_de_backtest_s_executent_vraiment(capsys):
     pas : une variable mal nommée ou un format d'affichage invalide passe la
     compilation et casse au moment de s'en servir.
     """
-    backtest, verdict = cellules_de_code()[-2], cellules_de_code()[-1]
+    backtest = cellule_contenant("SPREADS", "fetch_history")
+    baseline = cellule_contenant("entry_mode")
+    verdict = cellule_contenant("Verdict", "no_trade_reason")
 
     for marche_ouvert in (True, False):
         espace = {"__name__": "__main__",
                   "courtier": _courtier_factice(marche_ouvert)}
         _executer(backtest, espace)
+        _executer(baseline, espace)
         _executer(verdict, espace)
 
         sortie = capsys.readouterr().out
