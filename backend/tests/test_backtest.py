@@ -693,3 +693,177 @@ def test_sur_une_marche_aleatoire_le_signal_ne_bat_pas_le_hasard():
         f"  marche aléatoire : signal {signal.win_rate:.1%} contre "
         f"{moyenne:.1%} au hasard (5 tirages) -> aucun avantage, comme attendu"
     )
+
+
+def trend_with_pullbacks(n, seed=5, drift=0.00025, noise=0.0006):
+    """Hausse nette MAIS avec des replis — un marché en tendance réaliste.
+
+    Une hausse parfaitement monotone ne ferme jamais un stop suiveur : il
+    remonte indéfiniment sans être touché, et aucun trade ne se dénoue. Il
+    faut des respirations pour que la sortie suiveuse se déclenche.
+    """
+    rng = random.Random(seed)
+    candles, price = [], 1.10
+    for _ in range(n):
+        o = price
+        c = price + drift + rng.gauss(0, noise)
+        candles.append(candle(
+            o, max(o, c) + abs(rng.gauss(0, noise / 2)),
+            min(o, c) - abs(rng.gauss(0, noise / 2)), c,
+        ))
+        price = c
+    return candles
+
+
+def test_le_stop_suiveur_laisse_courir_les_gagnants():
+    """C'est toute la raison d'être du mode : ne plus couper à 1,5x.
+
+    L'objectif fixe encaisse 1,5x le risque et sort. Le stop suiveur doit
+    capter bien davantage sur les vraies tendances — sinon le mode ne sert
+    à rien.
+    """
+    candles = trend_with_pullbacks(3000)
+    fixe = run_backtest(candles, spread=0.0, financing_rate_annual=0.0)
+    suiveur = run_backtest(candles, spread=0.0, financing_rate_annual=0.0,
+                           exit_mode="trailing")
+
+    assert fixe.closed and suiveur.closed
+    meilleur_fixe = max(t.pl for t in fixe.closed)
+    meilleur_suiveur = max(t.pl for t in suiveur.closed)
+    assert meilleur_suiveur > meilleur_fixe * 2, (
+        f"meilleur gain suiveur {meilleur_suiveur:.2f} contre {meilleur_fixe:.2f} "
+        f"en fixe : le stop suiveur ne laisse pas courir"
+    )
+    print(
+        f"  hausse franche : meilleur gain {meilleur_fixe:.2f} (fixe) -> "
+        f"{meilleur_suiveur:.2f} (suiveur)"
+    )
+
+
+def test_le_stop_suiveur_ne_regarde_pas_le_futur():
+    """Le stop doit remonter APRÈS le test de déclenchement, jamais avant.
+
+    Remonter le stop avec le plus haut de la bougie en cours, puis tester le
+    déclenchement dans cette même bougie, reviendrait à connaître le sommet
+    avant de l'avoir vécu. Ce serait invisible dans les chiffres, sauf qu'ils
+    seraient trop beaux.
+
+    Vérification : les décisions passées ne doivent pas changer quand on
+    ajoute des bougies futures.
+    """
+    complet = random_walk(1200, seed=77)
+    court = complet[:900]
+
+    entier = run_backtest(complet, spread=0.00008, exit_mode="trailing",
+                          financing_rate_annual=0.0)
+    tronque = run_backtest(court, spread=0.00008, exit_mode="trailing",
+                           financing_rate_annual=0.0)
+
+    # Les trades entièrement dénoués avant la coupure doivent être identiques.
+    clos_avant = [t for t in tronque.closed if t.exit_index is not None
+                  and t.exit_index < 880]
+    assert clos_avant, "aucun trade dénoué avant la coupure : test sans portée"
+
+    par_entree = {t.entry_index: t for t in entier.trades}
+    for t in clos_avant:
+        jumeau = par_entree.get(t.entry_index)
+        assert jumeau is not None, f"trade à {t.entry_index} absent du run complet"
+        assert jumeau.exit_index == t.exit_index, (
+            f"trade entré à {t.entry_index} : sortie {t.exit_index} sur données "
+            f"tronquées, {jumeau.exit_index} sur données complètes"
+        )
+        assert abs(jumeau.pl - t.pl) < 1e-9
+    print(f"  {len(clos_avant)} trades identiques avec et sans les bougies futures")
+
+
+def test_le_stop_suiveur_ne_descend_jamais():
+    """Un stop suiveur qui redescend transformerait une perte bornée en gouffre."""
+    candles = random_walk(2000, seed=51)
+    r = run_backtest(candles, spread=0.00008, exit_mode="trailing",
+                     financing_rate_annual=0.0)
+    assert r.closed
+
+    for t in r.closed:
+        perte_initiale = -t.pl_if_loss  # risque de départ, positif
+        assert t.pl >= -perte_initiale * 1.01, (
+            f"perte de {t.pl:.2f} alors que le risque initial valait "
+            f"{perte_initiale:.2f} : le stop a reculé"
+        )
+    pires = sorted(t.pl for t in r.closed)[:3]
+    print(f"  {len(r.closed)} trades, pires pertes : "
+          f"{', '.join(f'{p:.2f}' for p in pires)} (risque initial 2,50)")
+
+
+def test_le_bootstrap_remplace_le_binomial_en_sortie_suiveuse():
+    """Le seuil d'équilibre n'a plus de sens quand les gains sont inégaux."""
+    from app.backtest import bootstrap_p_value
+
+    candles = random_walk(3000, seed=61)
+    suiveur = run_backtest(candles, spread=0.00008, exit_mode="trailing",
+                           financing_rate_annual=0.0)
+    assert suiveur.closed
+
+    attendu = bootstrap_p_value([t.pl for t in suiveur.closed])
+    assert abs(suiveur.p_value - attendu) < 1e-12, "le bootstrap n'est pas utilisé"
+    assert "bootstrap" in suiveur.summary()
+    assert "seuil sans objet" in suiveur.summary()
+    assert suiveur.trades_needed() is None, (
+        "trades_needed projette depuis le taux de réussite : sans objet ici"
+    )
+
+    # Et les tailles de gains doivent bien être inégales, sinon le test ne
+    # porte sur rien.
+    gains = [t.pl for t in suiveur.closed if t.pl > 0]
+    assert len(set(round(g, 4) for g in gains)) > len(gains) * 0.5, (
+        "les gains sont tous identiques : ce n'est pas une sortie suiveuse"
+    )
+    print(f"  bootstrap utilisé, p = {suiveur.p_value:.1%}, "
+          f"{len(set(round(g, 2) for g in gains))} tailles de gains distinctes")
+
+
+def test_le_bootstrap_detecte_une_esperance_clairement_positive():
+    """Contrôle du test lui-même, dans les deux sens."""
+    from app.backtest import bootstrap_p_value
+
+    gagnant = [10.0] * 30 + [-2.0] * 70     # espérance +0,6
+    perdant = [2.0] * 70 + [-10.0] * 30     # espérance -1,6
+    neutre = [1.0] * 50 + [-1.0] * 50       # espérance 0
+
+    p_gagnant = bootstrap_p_value(gagnant)
+    p_perdant = bootstrap_p_value(perdant)
+    p_neutre = bootstrap_p_value(neutre)
+
+    assert p_gagnant < 0.05, p_gagnant
+    assert p_perdant < 0.05, p_perdant
+    assert p_neutre > 0.20, p_neutre
+    print(f"  espérance +0,6 -> p={p_gagnant:.1%} | -1,6 -> p={p_perdant:.1%} | "
+          f"0 -> p={p_neutre:.1%}")
+
+
+def test_la_coupe_est_chronologique_et_sans_recouvrement():
+    """Mélanger les bougies laisserait des morceaux du futur dans la mise au point."""
+    from app.backtest import split_history
+
+    candles = random_walk(1000, seed=91)
+    mise_au_point, validation = split_history(candles, validation_fraction=0.3)
+
+    assert len(mise_au_point) == 700
+    assert len(validation) == 300
+    assert mise_au_point + validation == candles, "l'ordre n'est pas préservé"
+    # Aucune bougie ne doit apparaître des deux côtés.
+    assert mise_au_point[-1] is candles[699]
+    assert validation[0] is candles[700]
+    print(f"  {len(mise_au_point)} bougies de mise au point puis "
+          f"{len(validation)} de validation, dans l'ordre")
+
+
+def test_la_coupe_refuse_une_fraction_absurde():
+    from app.backtest import split_history
+
+    for mauvaise in (0.0, 1.0, -0.2, 1.5):
+        try:
+            split_history(random_walk(200), validation_fraction=mauvaise)
+            raise AssertionError(f"{mauvaise} accepté")
+        except ValueError:
+            pass
+    print("  fractions hors ]0,1[ refusées")

@@ -279,6 +279,68 @@ for g in INTERVALLES:
     else:
         print(f"         -> indiscernable du hasard sur {g} : le signal ne vaut rien")"""),
 
+md("""## 4 ter. Changer de stratégie sans se mentir
+
+Le croisement de moyennes mobiles avec objectif fixe a été mesuré perdant.
+Avant d'en essayer une autre, une règle non négociable :
+
+> **Essayer dix stratégies sur les mêmes données et garder la meilleure
+> garantit d'en trouver une qui paraît rentable — par pur hasard.**
+
+Exactement comme dix pièces lancées dix fois donnent forcément une belle série
+de faces. Cette stratégie-là perdra en réel, et elle aura l'air excellente en
+backtest. C'est une erreur bien plus coûteuse que celle qu'on vient d'éviter.
+
+D'où la coupe chronologique : on cherche et on compare sur les **70 %
+premiers**, et on n'exécute les **30 % derniers qu'une seule fois**, tout à la
+fin. Chaque essai supplémentaire sur la période de validation la transforme en
+période de mise au point, et le garde-fou disparaît sans prévenir.
+
+**La première hypothèse testée ici** : le suivi de tendance gagne par quelques
+très gros gagnants, et un objectif fixe à 1,5x les coupe systématiquement. On
+compare donc l'objectif fixe à un **stop suiveur** qui laisse courir.
+
+Sur données synthétiques, à spread 2 pips : en légère tendance la sortie
+suiveuse fait +438 contre +290 avec un taux de réussite plus BAS (44 % contre
+50 %) ; sur du bruit pur elle perd quand même, moins. Elle exploite un
+avantage, elle n'en fabrique pas.
+"""),
+code("""from app.backtest import split_history
+
+SPREAD_REEL = SPREADS.get("2,0 pip (large)", 0.00020)
+
+for g in INTERVALLES:
+    mise_au_point, validation = split_history(historique[g], validation_fraction=0.3)
+    print(f"=== {g} — {len(mise_au_point)} bougies de mise au point, "
+          f"{len(validation)} de validation ===")
+    print(f"{'période':<14}{'sortie':<11}{'trades':>7}{'réussite':>10}"
+          f"{'P/L':>10}{'meilleur':>10}{'p':>8}  verdict")
+
+    for nom_periode, bougies in [("mise au point", mise_au_point),
+                                 ("VALIDATION", validation)]:
+        for mode in ("fixed", "trailing"):
+            r = run_backtest(
+                bougies, instrument=INSTRUMENT, granularity=g,
+                spread=SPREAD_REEL, reward_ratio=1.5, risk_amount=2.5,
+                financing_rate_annual=0.02, exit_mode=mode,
+            )
+            if not r.closed:
+                print(f"{nom_periode:<14}{mode:<11}  aucun trade dénoué "
+                      f"({r.no_trade_reason()[:40]})")
+                continue
+            meilleur = max(t.pl for t in r.closed)
+            ouverts = f"  (+{r.still_open} ouvert)" if r.still_open else ""
+            print(f"{nom_periode:<14}{mode:<11}{len(r.closed):>7}{r.win_rate:>9.1%}"
+                  f"{r.net_pl:>+10.2f}{meilleur:>+10.2f}{r.p_value:>8.1%}"
+                  f"  {r.verdict}{ouverts}")
+    print()
+
+print("Lis la ligne VALIDATION en dernier, et une seule fois.")
+print("Si elle contredit la mise au point, c'est la VALIDATION qui a raison :")
+print("c'est la seule période que la stratégie n'a pas eu l'occasion de")
+print("flatter. Et si tu relances cette cellule après avoir changé un réglage,")
+print("la validation n'en est plus une.")"""),
+
 md("""## 5. Le verdict
 
 Une lecture directe, sans enrobage — mais **prudente sur trois points** qui

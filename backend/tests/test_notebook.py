@@ -330,7 +330,8 @@ def test_les_cellules_de_backtest_s_executent_vraiment(capsys):
     compilation et casse au moment de s'en servir.
     """
     backtest = cellule_contenant("SPREADS", "fetch_history")
-    baseline = cellule_contenant("entry_mode")
+    baseline = cellule_contenant("entry_mode", "TIRAGES")
+    strategies = cellule_contenant("split_history")
     verdict = cellule_contenant("Verdict", "no_trade_reason")
 
     for marche_ouvert in (True, False):
@@ -338,6 +339,7 @@ def test_les_cellules_de_backtest_s_executent_vraiment(capsys):
                   "courtier": _courtier_factice(marche_ouvert)}
         _executer(backtest, espace)
         _executer(baseline, espace)
+        _executer(strategies, espace)
         _executer(verdict, espace)
 
         sortie = capsys.readouterr().out

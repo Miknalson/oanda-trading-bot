@@ -123,6 +123,38 @@ def binomial_tail_p(n: int, k: int, p: float) -> float:
     return min(total, 1.0)
 
 
+def bootstrap_p_value(
+    resultats: list[float], *, tirages: int = 2000, seed: int = 0
+) -> float:
+    """Probabilité que l'espérance soit nulle, vu ces résultats.
+
+    Le test binomial suppose que chaque trade rapporte `+ratio x risque` ou
+    coûte `-risque` — vrai avec un objectif fixe, faux dès que les gagnants
+    courent. Avec des gains de tailles très inégales, le taux de réussite ne
+    décide plus de rien : une stratégie à 30 % de réussite peut être très
+    rentable si les gagnants sont énormes.
+
+    On rééchantillonne donc les trades avec remise et on regarde à quelle
+    fréquence la moyenne change de signe. C'est un bootstrap par centiles,
+    unilatéral dans le sens du résultat observé.
+
+    Attention à sa limite : il suppose les trades indépendants et
+    interchangeables. Une série de pertes corrélées — un régime de marché
+    défavorable qui dure — est sous-estimée par ce test.
+    """
+    n = len(resultats)
+    if n == 0:
+        return 1.0
+    moyenne = sum(resultats) / n
+    rng = random.Random(seed)
+    contraires = 0
+    for _ in range(tirages):
+        echantillon = sum(resultats[rng.randrange(n)] for _ in range(n)) / n
+        if (moyenne > 0 and echantillon <= 0) or (moyenne <= 0 and echantillon >= 0):
+            contraires += 1
+    return contraires / tirages
+
+
 @dataclass
 class BacktestTrade:
     direction: str
@@ -134,6 +166,9 @@ class BacktestTrade:
     pl_if_win: float = 0.0
     pl_if_loss: float = 0.0
     financing: float = 0.0
+    # Extrême atteint depuis l'entrée, et distance de suivi du stop.
+    peak: float = 0.0
+    trail_distance: float = 0.0
     exit_index: int | None = None
     exit_price: float | None = None
     won: bool | None = None
@@ -147,6 +182,7 @@ class BacktestResult:
     granularity: str
     candles: int
     entry_mode: str = "signal"
+    exit_mode: str = "fixed"
     trades: list[BacktestTrade] = field(default_factory=list)
     spread: float = 0.0
     reward_ratio: float = 1.5
@@ -165,6 +201,17 @@ class BacktestResult:
     @property
     def closed(self) -> list[BacktestTrade]:
         return [t for t in self.trades if t.won is not None]
+
+    @property
+    def still_open(self) -> int:
+        """Trades encore ouverts à la fin de l'historique.
+
+        Ils sont exclus du P/L, et c'est correct : leur résultat n'existe pas
+        encore. Mais les taire serait trompeur, surtout en sortie suiveuse où
+        une position peut rester ouverte très longtemps — le P/L mesuré
+        omettrait alors le trade le plus important de la période.
+        """
+        return sum(1 for t in self.trades if t.won is None)
 
     @property
     def wins(self) -> int:
@@ -233,6 +280,12 @@ class BacktestResult:
                 f"faut plus de {WARMUP + 1} pour amorcer les indicateurs "
                 f"(SMA {SLOW_PERIOD}, ATR {ATR_PERIOD})"
             )
+        if self.still_open:
+            return (
+                f"{self.still_open} trade(s) ouvert(s) mais aucun dénoué avant la "
+                f"fin de l'historique — fréquent en sortie suiveuse quand le "
+                f"marché ne recule jamais assez pour toucher le stop"
+            )
         if self.bars_examined == 0:
             return "aucune bougie examinée"
 
@@ -253,6 +306,24 @@ class BacktestResult:
 
     @property
     def p_value(self) -> float:
+        """Probabilité d'un résultat au moins aussi extrême, à l'équilibre.
+
+        Deux tests selon le régime de sortie, parce que la question n'est pas
+        la même. Avec un objectif fixe, chaque trade rapporte ou coûte un
+        montant connu : le taux de réussite décide de tout, et la loi
+        binomiale répond exactement. Avec un stop suiveur, les gains sont de
+        tailles très inégales et le taux de réussite ne décide plus rien — on
+        teste alors directement l'espérance, par bootstrap.
+
+        Appliquer le test binomial à une sortie suiveuse donnerait un chiffre
+        qui a l'air d'un résultat et n'en est pas un.
+        """
+        if self.exit_mode == "trailing":
+            return bootstrap_p_value([t.pl for t in self.closed])
+        return self._p_value_binomial
+
+    @property
+    def _p_value_binomial(self) -> float:
         """Probabilité d'obtenir un taux de réussite au moins aussi extrême
         que celui mesuré, si la stratégie était en réalité exactement à
         l'équilibre.
@@ -292,7 +363,9 @@ class BacktestResult:
         côté du seuil, ou si même `maximum` trades ne suffiraient pas.
         """
         n0 = len(self.closed)
-        if n0 == 0 or self.is_conclusive:
+        if n0 == 0 or self.is_conclusive or self.exit_mode == "trailing":
+            # En sortie suiveuse, projeter à partir du seul taux de réussite
+            # n'aurait pas de sens : c'est la taille des gagnants qui décide.
             return None
         taux, seuil = self.win_rate, self.breakeven_win_rate
         if taux >= seuil:
@@ -322,8 +395,12 @@ class BacktestResult:
         lignes = [
             f"{self.instrument} {self.granularity} — {self.candles} bougies",
             f"  trades          : {n}",
-            f"  taux de réussite: {self.win_rate:.1%}  "
-            f"(seuil d'équilibre {self.breakeven_win_rate:.1%})",
+            f"  taux de réussite: {self.win_rate:.1%}"
+            + (
+                "  (seuil sans objet : les gains sont de tailles inégales)"
+                if self.exit_mode == "trailing"
+                else f"  (seuil d'équilibre {self.breakeven_win_rate:.1%})"
+            ),
             f"  P/L net         : {self.net_pl:+.2f}",
             f"  coût du spread  : {self.total_spread_cost:.2f} "
             f"(payé en pertes plus fréquentes)",
@@ -331,8 +408,15 @@ class BacktestResult:
             f"(déduit du résultat)",
             f"  par trade       : {self.expectancy:+.3f}",
             f"  pire recul      : {self.max_drawdown:.2f}",
+            *(
+                [f"  ⚠️ encore ouvert : {self.still_open} trade(s) non dénoué(s) "
+                 f"en fin d'historique, exclus du P/L"]
+                if self.still_open
+                else []
+            ),
             f"  malchance ?     : {self.p_value:.1%} de probabilité d'un tel "
-            f"résultat à l'équilibre",
+            f"résultat à l'équilibre"
+            + (" (bootstrap)" if self.exit_mode == "trailing" else " (binomial)"),
             f"  verdict         : {self.verdict}",
         ]
         if not self.is_conclusive:
@@ -357,6 +441,8 @@ def run_backtest(
     financing_rate_annual: float = 0.02,
     max_spread_ratio: float = MAX_SPREAD_RATIO,
     entry_mode: str = "signal",
+    exit_mode: str = "fixed",
+    trail_multiplier: float = 2.0,
     seed: int = 0,
 ) -> BacktestResult:
     """Rejoue la stratégie bougie par bougie, sans regard vers le futur.
@@ -379,6 +465,8 @@ def run_backtest(
     """
     if entry_mode not in ("signal", "random"):
         raise ValueError(f"entry_mode inconnu : {entry_mode!r} (signal ou random)")
+    if exit_mode not in ("fixed", "trailing"):
+        raise ValueError(f"exit_mode inconnu : {exit_mode!r} (fixed ou trailing)")
     tirage = random.Random(seed)
     result = BacktestResult(
         instrument=instrument,
@@ -390,6 +478,7 @@ def run_backtest(
         financing_rate_annual=financing_rate_annual,
         max_spread_ratio=max_spread_ratio,
         entry_mode=entry_mode,
+        exit_mode=exit_mode,
     )
 
     bar_hours = GRANULARITY_HOURS.get(granularity, 1.0)
@@ -412,6 +501,11 @@ def run_backtest(
             else:
                 hit_tp = low <= open_trade.take_profit
                 hit_sl = high >= open_trade.stop_loss
+
+            # En sortie suiveuse il n'y a PAS d'objectif : on ne sort que par
+            # le stop, qui remonte derrière le prix.
+            if exit_mode == "trailing":
+                hit_tp = False
 
             if hit_sl or hit_tp:
                 # Quand une même bougie touche les deux, on ne sait pas
@@ -436,10 +530,49 @@ def run_backtest(
                     notional * financing_rate_annual * hours_held / (365 * 24)
                 )
 
-                open_trade.pl = (
-                    open_trade.pl_if_win if won else open_trade.pl_if_loss
-                ) + open_trade.financing
+                if exit_mode == "trailing":
+                    # Le gain n'est plus binaire : il vaut la distance
+                    # réellement parcourue jusqu'au stop suiveur. C'est tout
+                    # l'intérêt — laisser courir un gagnant au lieu de le
+                    # couper à 1,5x, ce qui est la façon classique de tuer une
+                    # stratégie de suivi de tendance.
+                    sortie = open_trade.exit_price
+                    parcours = (
+                        sortie - open_trade.entry_price
+                        if open_trade.direction == "buy"
+                        else open_trade.entry_price - sortie
+                    )
+                    open_trade.pl = parcours * open_trade.units + open_trade.financing
+                    open_trade.won = open_trade.pl > 0
+                else:
+                    open_trade.pl = (
+                        open_trade.pl_if_win if won else open_trade.pl_if_loss
+                    ) + open_trade.financing
                 open_trade = None
+                continue
+
+            if exit_mode == "trailing":
+                # Le stop remonte APRÈS le test de déclenchement, jamais avant.
+                #
+                # L'ordre compte, et l'inverser serait un regard vers le futur
+                # déguisé : utiliser le plus haut de la bougie EN COURS pour
+                # remonter le stop, puis vérifier si ce nouveau stop a été
+                # touché dans cette même bougie, reviendrait à connaître le
+                # sommet avant de l'avoir vécu. On teste donc avec le niveau
+                # hérité de la bougie précédente, puis on le remonte pour la
+                # suivante.
+                if open_trade.direction == "buy":
+                    open_trade.peak = max(open_trade.peak, high)
+                    open_trade.stop_loss = max(
+                        open_trade.stop_loss,
+                        open_trade.peak - open_trade.trail_distance + spread,
+                    )
+                else:
+                    open_trade.peak = min(open_trade.peak, low)
+                    open_trade.stop_loss = min(
+                        open_trade.stop_loss,
+                        open_trade.peak + open_trade.trail_distance - spread,
+                    )
             continue
 
         # --- Pas de position : chercher un signal sur le passé seulement ---
@@ -496,6 +629,11 @@ def run_backtest(
             stop_level = entry + stop_distance - spread
             target_level = entry - tp_distance - spread
 
+        if exit_mode == "trailing":
+            # Objectif repoussé hors d'atteinte : seule la sortie suiveuse
+            # décide. Laisser un objectif atteignable annulerait l'expérience.
+            target_level = entry + 1e9 if direction == "buy" else entry - 1e9
+
         open_trade = BacktestTrade(
             direction=direction,
             entry_index=i + 1,
@@ -503,12 +641,42 @@ def run_backtest(
             stop_loss=stop_level,
             take_profit=target_level,
             units=units,
+            peak=entry,
+            trail_distance=atr_value * trail_multiplier,
             pl_if_win=tp_distance * units,
             pl_if_loss=-stop_distance * units,
         )
         result.trades.append(open_trade)
 
     return result
+
+
+def split_history(
+    candles: list[Candle], *, validation_fraction: float = 0.3
+) -> tuple[list[Candle], list[Candle]]:
+    """Coupe l'historique en deux : mise au point, puis validation.
+
+    C'est le garde-fou contre la façon la plus efficace de se mentir avec un
+    backtest. Essayer dix stratégies sur les mêmes données et garder la
+    meilleure garantit d'en trouver une qui paraît rentable — par pur hasard,
+    exactement comme dix pièces lancées dix fois donnent forcément une série
+    de faces. Cette stratégie-là perdra en réel.
+
+    La coupe est CHRONOLOGIQUE, jamais aléatoire : mélanger les bougies
+    laisserait des morceaux du futur dans la période de mise au point.
+
+    Règle d'usage, et elle ne vaut que si on s'y tient : on cherche, on règle
+    et on compare autant qu'on veut sur la première période. On n'exécute la
+    seconde qu'UNE SEULE FOIS, à la toute fin. Chaque essai supplémentaire
+    sur la période de validation la transforme en période de mise au point, et
+    le garde-fou disparaît sans prévenir.
+    """
+    if not 0 < validation_fraction < 1:
+        raise ValueError(
+            f"validation_fraction doit être entre 0 et 1 (reçu {validation_fraction})"
+        )
+    coupe = int(len(candles) * (1 - validation_fraction))
+    return candles[:coupe], candles[coupe:]
 
 
 async def fetch_history(
