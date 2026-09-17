@@ -53,6 +53,7 @@ import asyncio
 import logging
 import math
 import random
+from datetime import datetime
 from dataclasses import dataclass, field
 
 from .analysis import ATR_STOP_MULTIPLIER
@@ -122,6 +123,38 @@ def binomial_tail_p(n: int, k: int, p: float) -> float:
         )
         total += math.exp(log_terme)
     return min(total, 1.0)
+
+
+def heures_de_detention(
+    entree: Candle, sortie: Candle, bougies_ecoulees: int, heures_par_bougie: float
+) -> float:
+    """Durée réelle de détention, en heures.
+
+    Compter les BOUGIES et non le temps réel sous-estime le financement dès
+    que le marché ferme. Le Forex cote environ 5 jours sur 7 : en journalier,
+    garder 10 bougies représente 14 jours calendaires, facturés comme 10 —
+    soit 40 % de financement en moins qu'en réalité.
+
+    L'erreur est presque invisible en intraday, où les bougies s'enchaînent
+    sans trou dans la semaine. Elle devient dominante en journalier, où le
+    financement est justement le premier poste de coût. Autrement dit, elle
+    flatte exactement le cas qu'on s'apprête à tester.
+
+    Les horodatages donnent la vraie durée. Sans eux, on retombe sur le
+    comptage de bougies, faute de mieux.
+    """
+    if entree.time and sortie.time:
+        try:
+            debut = datetime.fromisoformat(entree.time.replace("Z", "+00:00"))
+            fin = datetime.fromisoformat(sortie.time.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            ecart = (fin - debut).total_seconds() / 3600
+            # Un horodatage incohérent ne doit pas produire un coût négatif.
+            if ecart >= 0:
+                return ecart
+    return bougies_ecoulees * heures_par_bougie
 
 
 def bootstrap_p_value(
@@ -552,7 +585,10 @@ def run_backtest(
 
                 # Financement : proportionnel au temps de détention. Il se
                 # déduit vraiment du résultat, contrairement au spread.
-                hours_held = (i - open_trade.entry_index) * bar_hours
+                hours_held = heures_de_detention(
+                    candles[open_trade.entry_index], candles[i],
+                    i - open_trade.entry_index, bar_hours,
+                )
                 notional = abs(open_trade.units) * open_trade.entry_price
                 open_trade.financing = -(
                     notional * financing_rate_annual * hours_held / (365 * 24)

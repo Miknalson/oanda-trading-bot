@@ -922,3 +922,78 @@ def test_l_agregat_sans_trade_nomme_la_cause():
     assert "spread" in resume and "trop cher" in resume
     assert "désigne la configuration" in resume
     print(f"  aucun trade partout -> « {resume.splitlines()[-1].strip()} »")
+
+
+def test_le_financement_compte_le_temps_reel_pas_les_bougies():
+    """Le Forex ferme le week-end : 10 bougies journalières = 14 jours.
+
+    Compter les bougies sous-estime le financement de 40 % en journalier —
+    et le financement y est le premier poste de coût. L'erreur flatte donc
+    exactement le cas qu'on veut tester.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.backtest import heures_de_detention
+
+    # Deux semaines de bougies journalières, week-ends exclus.
+    base = datetime(2026, 1, 5, tzinfo=timezone.utc)  # un lundi
+    jours = []
+    jour = base
+    while len(jours) < 11:
+        if jour.weekday() < 5:
+            jours.append(jour)
+        jour += timedelta(days=1)
+
+    entree = Candle(1.1, 1.1, 1.1, 1.1, time=jours[0].strftime("%Y-%m-%dT%H:%M:%SZ"))
+    sortie = Candle(1.1, 1.1, 1.1, 1.1, time=jours[10].strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    reel = heures_de_detention(entree, sortie, 10, 24.0)
+    naif = 10 * 24.0
+    assert reel > naif, f"durée réelle {reel}h contre comptage naïf {naif}h"
+    assert abs(reel - 14 * 24) < 1e-6, reel
+    print(f"  10 bougies journalières = {reel/24:.0f} jours réels, "
+          f"pas {naif/24:.0f} (+{reel/naif - 1:.0%} de financement)")
+
+    # Sans horodatage, on retombe sur le comptage de bougies.
+    nu = Candle(1.1, 1.1, 1.1, 1.1)
+    assert heures_de_detention(nu, nu, 10, 24.0) == 240.0
+
+    # Un horodatage incohérent ne doit pas produire un coût négatif.
+    inverse = heures_de_detention(sortie, entree, 10, 24.0)
+    assert inverse >= 0, inverse
+
+
+def test_le_financement_reel_alourdit_un_backtest_journalier():
+    """Effet mesurable de bout en bout, pas seulement sur la fonction."""
+    from datetime import datetime, timedelta, timezone
+
+    rng = random.Random(3)
+    base = datetime(2020, 1, 6, tzinfo=timezone.utc)
+    bougies, prix, jour = [], 1.10, base
+    while len(bougies) < 1500:
+        if jour.weekday() < 5:
+            o = prix
+            c = prix + rng.gauss(0, 0.006)
+            bougies.append(Candle(
+                open=o, high=max(o, c) + abs(rng.gauss(0, 0.003)),
+                low=min(o, c) - abs(rng.gauss(0, 0.003)), close=c,
+                time=jour.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ))
+            prix = c
+        jour += timedelta(days=1)
+
+    date = run_backtest(bougies, spread=0.0002, granularity="D",
+                        financing_rate_annual=0.02)
+    sans_date = run_backtest(
+        [Candle(c.open, c.high, c.low, c.close) for c in bougies],
+        spread=0.0002, granularity="D", financing_rate_annual=0.02,
+    )
+    assert date.closed and sans_date.closed
+    assert date.total_financing < sans_date.total_financing, (
+        f"financement horodaté {date.total_financing:.2f} vs comptage de "
+        f"bougies {sans_date.total_financing:.2f} : le week-end n'est pas compté"
+    )
+    ecart = date.total_financing / sans_date.total_financing - 1
+    print(f"  journalier : financement {sans_date.total_financing:+.2f} "
+          f"(bougies) -> {date.total_financing:+.2f} (temps réel), "
+          f"+{ecart:.0%}")

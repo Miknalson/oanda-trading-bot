@@ -451,6 +451,32 @@ variantes. Choisir la configuration *après* avoir vu les résultats
 reviendrait à refaire exactement l'erreur que cette cellule existe pour
 éviter.
 
+### Pourquoi le journalier, et pas H1
+
+Le premier passage (H1, 1133 trades) a conclu PERDANT. Le journalier n'est pas
+une variante de plus : c'est le seul réglage qu'un **argument de coût** désigne
+avant tout résultat.
+
+| | stop | spread 2 pips | coût total |
+|---|---|---|---|
+| H1 | 12 pips | 17 % du stop | **19,2 % du risque** |
+| H4 | 30 pips | 7 % | 10,0 % |
+| **D** | **105 pips** | **2 %** | **6,7 %** |
+| W | 240 pips | 1 % | 10,3 % |
+
+On avait testé les deux échelles où les frais mordent le plus fort. En
+journalier le spread s'écrase, sans que le financement ait encore pris le
+dessus.
+
+⚠️ **C'est quand même un deuxième essai.** Un résultat positif de justesse
+devra en tenir compte — deux tirages, pas un.
+
+Le financement est ici le premier poste de coût, et il est désormais calculé
+sur le **temps réel** et non sur le nombre de bougies : le Forex cote 5 jours
+sur 7, donc 10 bougies journalières représentent 14 jours calendaires. Compter
+les bougies sous-estimait ce coût de 42 % — une erreur qui flattait précisément
+ce test-ci.
+
 Le tableau par instrument est affiché pour le diagnostic. **Ce n'est pas un
 menu.**
 """),
@@ -463,9 +489,20 @@ from app.broker import BrokerError
 # Déclarés AVANT de regarder quoi que ce soit.
 PAIRES = ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD",
           "USD_CHF", "USD_CAD", "NZD_USD", "EUR_GBP"]
-INTERVALLE_POOL = "H1"
-BOUGIES_POOL = 4000
 FILTRES_POOL = ("trend",)
+
+# ⚠️ DEUXIÈME test déclaré. Le premier (H1) a conclu PERDANT sur 1133 trades.
+#
+# Le journalier n'est pas « une variante de plus » : c'est le seul réglage
+# qu'un argument de COÛT désigne avant tout résultat. À un spread de 2 pips,
+# la part du risque qui part en frais vaut 19,2 % sur H1 et 6,7 % en
+# journalier — le spread s'y écrase (2 % du stop contre 17 %) sans que le
+# financement ait encore pris le dessus.
+#
+# Honnêteté statistique : c'est quand même un deuxième essai. Un résultat
+# positif de justesse devra en tenir compte.
+INTERVALLE_POOL = "D"
+BOUGIES_POOL = 5000     # ≈ 20 ans de séances
 
 histoires, spreads_pool = {}, {}
 for paire in PAIRES:
