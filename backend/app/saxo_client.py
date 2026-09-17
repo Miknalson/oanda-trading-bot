@@ -51,6 +51,59 @@ GRANULARITY_MINUTES = {
 }
 
 
+# Substitutions de « ponctuation intelligente » faites par iOS et par les
+# traitements de texte. Un jeton saisi sur téléphone en est truffé : le trait
+# d'union d'un jeton devient un tiret cadratin, et le jeton devient invalide
+# sans que rien ne le dise.
+PONCTUATION_INTELLIGENTE = {
+    "\u2014": "-",   # tiret cadratin —
+    "\u2013": "-",   # tiret demi-cadratin –
+    "\u2018": "'",   # apostrophe ouvrante ‘
+    "\u2019": "'",   # apostrophe fermante ’
+    "\u201c": '"',   # guillemet ouvrant “
+    "\u201d": '"',   # guillemet fermant ”
+    "\u00a0": "",    # espace insécable
+}
+
+
+def diagnostiquer_jeton(jeton: str) -> str | None:
+    """Décrit ce qui cloche dans un jeton, ou None s'il est utilisable.
+
+    Un jeton n'est qu'une suite de caractères ASCII. S'il en contient
+    d'autres, httpx lève une UnicodeEncodeError au moment d'encoder l'en-tête
+    HTTP — huit niveaux d'appels plus bas, avec une trace qui parle de codecs
+    et jamais du jeton. Le cas s'est produit en conditions réelles : un jeton
+    collé depuis un iPhone, dont la ponctuation intelligente avait remplacé un
+    trait d'union par un tiret cadratin.
+
+    On refuse donc ici, en nommant le caractère, sa position, et le remède.
+    Sans corriger nous-mêmes : deviner un identifiant est le genre de
+    correction silencieuse qui transforme une erreur claire en 401 obscur.
+    """
+    if not jeton:
+        return "jeton vide."
+
+    fautifs = [(i, c) for i, c in enumerate(jeton) if not c.isascii()]
+    if fautifs:
+        details = ", ".join(
+            f"« {c} » (U+{ord(c):04X}) en position {i + 1}"
+            + (f", probablement un « {PONCTUATION_INTELLIGENTE[c]} »"
+               if c in PONCTUATION_INTELLIGENTE else "")
+            for i, c in fautifs[:4]
+        )
+        return (
+            f"le jeton contient {len(fautifs)} caractère(s) non ASCII : {details}. "
+            "C'est la signature de la ponctuation intelligente d'iOS ou d'un "
+            "traitement de texte, qui remplace les traits d'union par des "
+            "tirets longs. Ressaisis le jeton sans passer par une application "
+            "qui reformate le texte."
+        )
+
+    if any(c.isspace() for c in jeton):
+        return "le jeton contient un espace ou un retour à la ligne."
+    return None
+
+
 class SaxoClient:
     # Plafond documenté de /chart/v3/charts : 1200 points par requête.
     max_candles_per_request = 1200
@@ -64,6 +117,13 @@ class SaxoClient:
                 "récupère le jeton (valable 24 h seulement) et renseigne-le "
                 "dans backend/.env."
             )
+
+        # Vérifié ici, à la construction : sinon l'erreur surgit au premier
+        # appel réseau, sous la forme d'une UnicodeEncodeError dans httpx qui
+        # ne mentionne jamais le jeton.
+        probleme = diagnostiquer_jeton(self.settings.saxo_access_token)
+        if probleme:
+            raise SaxoError(f"Jeton Saxo inutilisable : {probleme}")
         # Résolus une fois à la première requête : Saxo identifie le compte
         # par des clés opaques, pas par le numéro affiché dans l'interface.
         self._account_key: str | None = None

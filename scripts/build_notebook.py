@@ -96,12 +96,40 @@ Récupère-le sur [developer.saxo](https://www.developer.saxo/) — il est valab
 
 Il est saisi en masqué et reste en mémoire : il n'apparaît ni dans le carnet,
 ni dans les sorties, ni sur le disque.
+
+⚠️ **Si tu es sur iPhone**, le clavier remplace parfois les traits d'union du
+jeton par des tirets longs (« ponctuation intelligente »). La cellule le
+détecte et le corrige, en te disant ce qu'elle a changé.
 """),
 code("""import os, getpass
 
 os.environ["BROKER"] = "saxo"
 os.environ["SAXO_ENVIRONMENT"] = "sim"
-os.environ["SAXO_ACCESS_TOKEN"] = getpass.getpass("Jeton Saxo (24 h) : ").strip()
+jeton = getpass.getpass("Jeton Saxo (24 h) : ").strip()
+
+# Les claviers d'iPhone et les traitements de texte remplacent les traits
+# d'union par des tirets longs — « ponctuation intelligente ». Un jeton en est
+# alors truffé, et l'erreur ne surgit qu'au premier appel réseau, sous la forme
+# d'une UnicodeEncodeError dans httpx qui ne mentionne jamais le jeton.
+# Le cas s'est produit en conditions réelles, sur un tiret cadratin.
+from app.saxo_client import PONCTUATION_INTELLIGENTE, diagnostiquer_jeton
+
+corrections = {c: r for c, r in PONCTUATION_INTELLIGENTE.items() if c in jeton}
+if corrections:
+    for mauvais, bon in corrections.items():
+        combien = jeton.count(mauvais)
+        jeton = jeton.replace(mauvais, bon)
+        print(f"⚠️ {combien} « {mauvais} » remplacé(s) par « {bon} » "
+              f"(ponctuation intelligente)")
+    print("   Si la connexion échoue quand même, ressaisis le jeton sans")
+    print("   passer par une application qui reformate le texte.")
+
+probleme = diagnostiquer_jeton(jeton)
+if probleme:
+    print(f"❌ {probleme}")
+    raise SystemExit(1)
+
+os.environ["SAXO_ACCESS_TOKEN"] = jeton
 
 # La configuration est mise en cache au premier appel. Sans ce vidage, une
 # correction de jeton n'aurait aucun effet : tu réexécuterais la cellule

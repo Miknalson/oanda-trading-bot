@@ -72,16 +72,40 @@ def test_le_carnet_est_du_python_valide():
 
 
 def test_le_jeton_n_est_jamais_en_dur():
-    """Le jeton doit toujours passer par une saisie masquée."""
+    """Le jeton doit toujours venir d'une saisie masquée, jamais du source.
+
+    Vérification sur l'arbre syntaxique et non ligne par ligne : depuis que la
+    cellule nettoie la ponctuation intelligente avant d'affecter, la valeur
+    passe par une variable et une recherche de « getpass » sur la ligne ne
+    prouve plus rien. Ce qui compte est qu'aucune CHAÎNE LITTÉRALE n'atterrisse
+    dans la variable d'environnement.
+    """
+    import ast
+
     joint = "\n".join(cellules_de_code())
     assert "getpass" in joint, "la saisie masquée a disparu du carnet"
-    for cellule in cellules_de_code():
-        for ligne in code_seul(cellule).splitlines():
-            if "SAXO_ACCESS_TOKEN" in ligne and "=" in ligne:
-                assert "getpass" in ligne or "os.environ.get" in ligne, (
-                    f"jeton potentiellement en dur : {ligne.strip()}"
+
+    for numero, cellule in enumerate(cellules_de_code(), 1):
+        arbre = ast.parse(code_seul(cellule))
+        for noeud in ast.walk(arbre):
+            if not isinstance(noeud, ast.Assign):
+                continue
+            for cible in noeud.targets:
+                if "SAXO_ACCESS_TOKEN" not in ast.unparse(cible):
+                    continue
+                assert not isinstance(noeud.value, ast.Constant), (
+                    f"cellule {numero} : jeton en dur -> {ast.unparse(noeud)}"
                 )
-    print("  le jeton passe uniquement par une saisie masquée")
+                source = ast.unparse(noeud.value)
+                assert "getpass" in source or source.isidentifier(), (
+                    f"cellule {numero} : le jeton ne vient pas d'une saisie "
+                    f"masquée -> {ast.unparse(noeud)}"
+                )
+
+    # Et la variable intermédiaire doit bien naître d'un getpass.
+    saisie = cellule_contenant("SAXO_ACCESS_TOKEN", "getpass")
+    assert "getpass.getpass(" in saisie
+    print("  le jeton vient d'une saisie masquée, jamais d'une chaîne du source")
 
 
 def test_le_carnet_est_a_jour():

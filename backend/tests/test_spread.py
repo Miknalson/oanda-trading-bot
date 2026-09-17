@@ -206,3 +206,49 @@ def test_le_garde_fou_est_desactive_par_defaut():
     ))
     assert suggestion.suggested_units != 0
     print(f"  défaut désactivé -> {abs(suggestion.suggested_units)} unités acceptées")
+
+
+def test_un_jeton_avec_ponctuation_intelligente_est_refuse_clairement():
+    """Le cas réel : un tiret cadratin collé depuis un iPhone.
+
+    Sans cette vérification, l'erreur ne surgit qu'au premier appel réseau,
+    sous la forme d'une UnicodeEncodeError levée huit niveaux plus bas dans
+    httpx — une trace qui parle de codecs ASCII et jamais du jeton.
+    """
+    from app.saxo_client import SaxoError, diagnostiquer_jeton
+
+    # Reproduit exactement le jeton fautif : tiret cadratin en position 9.
+    mauvais = "eyJhbGci—OiJIUzI1NiJ9.abcdef"
+    probleme = diagnostiquer_jeton(mauvais)
+    assert probleme is not None
+    assert "U+2014" in probleme
+    assert "position 9" in probleme
+    assert "iOS" in probleme or "ponctuation" in probleme
+
+    assert diagnostiquer_jeton("eyJhbGciOiJIUzI1NiJ9.abc-def_ghi") is None
+    assert diagnostiquer_jeton("") is not None
+    assert "espace" in diagnostiquer_jeton("abc def")
+
+    # Et le client doit refuser à la CONSTRUCTION, pas au premier appel.
+    import os
+    from dataclasses import replace
+
+    from app.config import get_settings
+    from app.saxo_client import SaxoClient
+
+    ancien = os.environ.get("SAXO_ACCESS_TOKEN")
+    os.environ["SAXO_ACCESS_TOKEN"] = mauvais
+    get_settings.cache_clear()
+    try:
+        SaxoClient(replace(get_settings(), saxo_access_token=mauvais))
+        raise AssertionError("client construit avec un jeton non ASCII")
+    except SaxoError as exc:
+        assert "inutilisable" in str(exc)
+    finally:
+        if ancien is None:
+            os.environ.pop("SAXO_ACCESS_TOKEN", None)
+        else:
+            os.environ["SAXO_ACCESS_TOKEN"] = ancien
+        get_settings.cache_clear()
+
+    print(f"  jeton avec « — » -> refusé à la construction, cause nommée")
