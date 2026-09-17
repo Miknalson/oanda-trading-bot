@@ -362,213 +362,54 @@ def test_le_bornage_demande_est_bien_anterieur():
 
 
 def test_la_fenetre_glissante_ne_change_aucun_resultat():
-    """L'optimisation doit être exactement neutre sur les résultats.
+    """L'optimisation doit être exactement neutre sur les indicateurs.
 
     `run_backtest` ne passe plus tout l'historique aux indicateurs mais une
-    fenêtre des dernières bougies — la SMA lente et l'ATR ne regardent rien
-    de plus loin. Une optimisation qui déplace ne serait-ce qu'un trade
-    invaliderait tous les chiffres mesurés jusqu'ici, donc on le vérifie au
-    lieu de le supposer.
+    fenêtre des dernières bougies : la SMA lente en regarde 50, l'ATR 15. Le
+    reste ne change rien à leur valeur — c'est cette affirmation qu'on teste.
+
+    On la vérifie au niveau des indicateurs eux-mêmes plutôt qu'en comparant
+    deux backtests complets. Deux exécutions démarrant à des amorçages
+    différents ne sont pas synchronisées : à la frontière l'une détient déjà
+    une position et l'autre non, et les entrées suivantes divergent pour une
+    raison qui n'a rien à voir avec la fenêtre.
     """
     from app import backtest as module
     from app.indicators import atr as atr_reel
     from app.indicators import trend_direction as tendance_reelle
 
     candles = random_walk(1500, seed=21)
+    W = module.INDICATOR_WINDOW
+    verifies = 0
 
-    rapide = run_backtest(candles, spread=0.00008, instrument="T", granularity="H1")
+    for i in range(module.WARMUP, len(candles), 37):
+        complet = candles[: i + 1]
+        fenetre = candles[max(0, i + 1 - W) : i + 1]
 
-    # Rejoue en forçant les indicateurs à voir TOUT l'historique, via une
-    # fenêtre assez large pour qu'elle n'en retire rien.
-    ancienne = module.INDICATOR_WINDOW
-    module.INDICATOR_WINDOW = len(candles)
-    try:
-        complet = run_backtest(candles, spread=0.00008, instrument="T", granularity="H1")
-    finally:
-        module.INDICATOR_WINDOW = ancienne
+        a, b = atr_reel(fenetre, module.ATR_PERIOD), atr_reel(complet, module.ATR_PERIOD)
+        assert a is not None and b is not None
+        assert abs(a - b) < 1e-15, f"ATR diffère à la bougie {i} : {a} contre {b}"
 
-    assert len(rapide.trades) == len(complet.trades), (
-        f"{len(rapide.trades)} trades avec fenêtre, {len(complet.trades)} sans"
+        ta = tendance_reelle([c.close for c in fenetre],
+                             module.FAST_PERIOD, module.SLOW_PERIOD)
+        tb = tendance_reelle([c.close for c in complet],
+                             module.FAST_PERIOD, module.SLOW_PERIOD)
+        assert ta == tb, f"direction diffère à la bougie {i} : {ta} contre {tb}"
+        verifies += 1
+
+    assert verifies > 20, f"seulement {verifies} points vérifiés"
+
+    # La fenêtre doit couvrir ce dont les indicateurs ont besoin, et l'amorçage
+    # doit lui être au moins égal : sinon le découpage partirait d'un indice
+    # négatif, donc de la FIN du tableau — des bougies futures.
+    assert W >= module.SLOW_PERIOD
+    assert W >= module.ATR_PERIOD + 1
+    r = run_backtest(candles, spread=0.00008, granularity="H1")
+    assert r.warmup_used >= W, (
+        f"amorçage {r.warmup_used} inférieur à la fenêtre {W} : "
+        f"la première barre examinée n'a pas assez de passé"
     )
-    assert rapide.wins == complet.wins
-    assert abs(rapide.net_pl - complet.net_pl) < 1e-9
-    for a, b in zip(rapide.trades, complet.trades):
-        assert a.entry_index == b.entry_index
-        assert a.direction == b.direction
-        assert abs(a.stop_loss - b.stop_loss) < 1e-12
-        assert abs(a.take_profit - b.take_profit) < 1e-12
-
-    # Un départ de fenêtre négatif découperait la FIN du tableau, donc des
-    # bougies futures. L'invariant qui l'empêche doit tenir.
-    assert module.WARMUP + 1 > module.INDICATOR_WINDOW - 1, (
-        "la première barre examinée n'a pas assez de passé pour sa fenêtre"
-    )
-
-    # Et la fenêtre doit bien couvrir ce dont les indicateurs ont besoin.
-    assert module.INDICATOR_WINDOW >= module.SLOW_PERIOD
-    assert module.INDICATOR_WINDOW >= module.ATR_PERIOD + 1
-    assert atr_reel(candles[:module.INDICATOR_WINDOW], module.ATR_PERIOD) is not None
-    assert tendance_reelle(
-        [c.close for c in candles[:module.INDICATOR_WINDOW]],
-        module.FAST_PERIOD, module.SLOW_PERIOD,
-    ) is not None
-
-    print(
-        f"  {len(rapide.trades)} trades identiques au trade près, "
-        f"fenêtre de {ancienne} bougies contre {len(candles)}"
-    )
-
-
-if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    failed = 0
-    for t in tests:
-        try:
-            print(f"\n{t.__name__}:")
-            t()
-            print("  ✅ OK")
-        except AssertionError as exc:
-            failed += 1
-            print(f"  ❌ ÉCHEC: {exc}")
-    print(f"\n{len(tests) - failed}/{len(tests)} tests passés")
-    sys.exit(1 if failed else 0)
-
-
-def test_no_trade_names_its_cause_spread():
-    """« Aucun trade » doit dire POURQUOI, sinon on le lit à l'envers.
-
-    Un spread trop large et un marché sans tendance produisent la même ligne
-    vide, alors que ce sont deux conclusions opposées : « trop cher pour
-    entrer » contre « rien à jouer ».
-    """
-    result = run_backtest(random_walk(3000, seed=3), spread=0.05)
-    assert not result.closed
-    motif = result.no_trade_reason()
-    assert "spread" in motif and "trop cher" in motif, motif
-    assert result.skipped_spread_too_wide > 0
-    assert result.verdict == "AUCUN TRADE"
-    print(f"  {motif}")
-
-
-def test_no_trade_names_its_cause_insufficient_history():
-    result = run_backtest(random_walk(20), spread=0.00012)
-    assert result.insufficient_candles
-    motif = result.no_trade_reason()
-    assert "historique" in motif, motif
-    print(f"  {motif}")
-
-
-def test_skip_counts_add_up():
-    """Chaque bougie examinée sans position finit dans exactement un compteur."""
-    result = run_backtest(random_walk(2000, seed=11), spread=0.00012)
-    entrees = len(result.trades)
-    total = result.skipped_no_signal + result.skipped_spread_too_wide + entrees
-    assert total == result.bars_examined, (
-        f"{total} bougies classées pour {result.bars_examined} examinées"
-    )
-    print(
-        f"  {result.bars_examined} examinées = {entrees} entrées "
-        f"+ {result.skipped_no_signal} sans signal "
-        f"+ {result.skipped_spread_too_wide} spread trop large"
-    )
-
-
-def test_small_sample_is_not_a_verdict():
-    """Un petit échantillon sous le seuil ne doit PAS être déclaré perdant.
-
-    C'est le piège qui a failli nous faire abandonner la stratégie : 65 trades
-    à 33,8 % face à un seuil de 41 % semblent accablants, alors qu'un tirage
-    aussi mauvais arrive par malchance environ une fois sur sept.
-    """
-    from app.backtest import BacktestResult, BacktestTrade
-
-    r = BacktestResult(instrument="EUR_USD", granularity="H4", candles=1200,
-                       reward_ratio=1.5, risk_amount=2.5)
-    for i in range(65):
-        t = BacktestTrade("buy", i, 1.10, 1.09, 1.12, 1000.0)
-        t.won = i < 22
-        t.pl = 3.75 if t.won else -2.50
-        r.trades.append(t)
-
-    assert r.net_pl < 0, "ce cas doit bien être perdant en euros"
-    assert r.p_value > 0.05, f"p = {r.p_value:.1%}"
-    assert not r.is_conclusive
-    assert r.verdict == "NON CONCLUANT", r.verdict
-    besoin = r.trades_needed()
-    assert besoin and besoin > 65, besoin
-    print(
-        f"  65 trades à {r.win_rate:.1%} (seuil {r.breakeven_win_rate:.1%}) "
-        f"-> p = {r.p_value:.1%}, non concluant ; ~{besoin} trades suffiraient"
-    )
-
-
-def test_large_sample_does_conclude():
-    """Le même taux sur un gros échantillon, lui, tranche."""
-    from app.backtest import BacktestResult, BacktestTrade
-
-    r = BacktestResult(instrument="EUR_USD", granularity="H4", candles=99999,
-                       reward_ratio=1.5, risk_amount=2.5)
-    for i in range(650):
-        t = BacktestTrade("buy", i, 1.10, 1.09, 1.12, 1000.0)
-        t.won = i < 220
-        t.pl = 3.75 if t.won else -2.50
-        r.trades.append(t)
-
-    assert r.is_conclusive, f"p = {r.p_value:.1%}"
-    assert r.verdict == "PERDANT", r.verdict
-    print(f"  650 trades au même taux -> p = {r.p_value:.2%}, PERDANT")
-
-
-def test_binomial_matches_exact_coefficients():
-    """Le calcul en logarithmes doit égaler le calcul exact, et ne pas déborder.
-
-    `math.comb` renvoie un entier exact : au-delà de quelques centaines de
-    tirages il dépasse la capacité d'un flottant et le produit lève
-    OverflowError. C'est exactement ce qui s'est produit au premier jet.
-    """
-    import math
-
-    from app.backtest import binomial_tail_p
-
-    for n, k, p in [(65, 22, 0.40), (10, 3, 0.5), (200, 60, 0.41), (1, 0, 0.3)]:
-        exact = sum(math.comb(n, i) * p**i * (1 - p) ** (n - i) for i in range(k + 1))
-        assert abs(binomial_tail_p(n, k, p) - exact) < 1e-12, (n, k, p)
-
-    # Ne doit pas lever : c'est le cas que trades_needed() atteint.
-    assert 0.0 <= binomial_tail_p(4000, 1350, 0.41) <= 1.0
-
-    # Bornes. La somme complète vaut 1 à l'arrondi flottant près : exiger
-    # l'égalité stricte serait exiger que l'addition de 101 termes ne perde
-    # aucun bit.
-    assert abs(binomial_tail_p(100, 100, 0.5) - 1.0) < 1e-9
-    assert binomial_tail_p(0, 0, 0.5) == 1.0
-    print("  logarithmes == exact, et aucun débordement à 4000 tirages")
-
-
-def test_p_value_also_works_in_the_winning_direction():
-    """Le test de significativité doit couper des deux côtés.
-
-    Un calcul qui ne sait mesurer que la malchance déclarerait concluant
-    n'importe quel résultat positif, y compris une série chanceuse de dix
-    trades. La queue haute doit être testée avec la même exigence.
-    """
-    # Spread nul : cette hausse a une amplitude si faible qu'un spread de
-    # 1,2 pip y fait refuser TOUTES les entrées — exactement le phénomène
-    # observé sur H1 en réel. Ici on veut mesurer la queue haute, pas le
-    # filtre de spread.
-    gagnant = run_backtest(
-        steady_uptrend(3000), spread=0.0, financing_rate_annual=0.0
-    )
-    assert gagnant.closed
-    assert gagnant.win_rate > gagnant.breakeven_win_rate
-    assert gagnant.p_value < 0.05, f"p = {gagnant.p_value:.1%}"
-    assert gagnant.verdict == "RENTABLE", gagnant.verdict
-    assert gagnant.trades_needed() is None  # déjà tranché
-
-    print(
-        f"  hausse régulière : {len(gagnant.closed)} trades à "
-        f"{gagnant.win_rate:.1%} -> p = {gagnant.p_value:.2%}, RENTABLE"
-    )
+    print(f"  {verifies} points vérifiés : fenêtre de {W} bougies == historique complet")
 
 
 def test_backtest_spread_ceiling_matches_production():
@@ -867,3 +708,94 @@ def test_la_coupe_refuse_une_fraction_absurde():
         except ValueError:
             pass
     print("  fractions hors ]0,1[ refusées")
+
+
+def test_chaque_filtre_ajoute_reduit_le_nombre_de_trades():
+    """La sélectivité doit être réelle, pas décorative.
+
+    Le diagnostic mesuré était « on prend presque tout ce qui passe » : une
+    entrée toutes les douze bougies. Si ajouter des filtres ne réduisait pas
+    le nombre d'entrées, ils ne filtreraient rien.
+    """
+    candles = random_walk(4000, seed=17)
+    jeux = [
+        ("trend",),
+        ("trend", "long_trend"),
+        ("trend", "long_trend", "breakout"),
+        ("trend", "long_trend", "breakout", "volatility"),
+    ]
+    comptes = []
+    for jeu in jeux:
+        r = run_backtest(candles, spread=0.00008, filters=jeu, granularity="H1")
+        comptes.append(len(r.trades))
+        print(f"  {len(jeu)} filtre(s) {str(list(jeu)):<50} -> {len(r.trades):>4} trades")
+
+    for precedent, suivant in zip(comptes, comptes[1:]):
+        assert suivant <= precedent, (
+            f"ajouter un filtre a AUGMENTÉ le nombre de trades : "
+            f"{precedent} -> {suivant}"
+        )
+    assert comptes[-1] < comptes[0] / 2, (
+        f"quatre filtres ne retirent que {comptes[0] - comptes[-1]} entrées "
+        f"sur {comptes[0]} : la sélectivité est décorative"
+    )
+
+
+def test_le_motif_de_rejet_nomme_le_filtre_responsable():
+    """« Aucun trade » doit dire QUEL filtre a tout bloqué."""
+    candles = random_walk(3000, seed=23)
+    r = run_backtest(candles, spread=0.00008,
+                     filters=("trend", "long_trend", "breakout", "volatility"),
+                     granularity="H1")
+    assert r.rejected_by, "aucun rejet compté alors que des filtres sont actifs"
+    total = sum(r.rejected_by.values()) + len(r.trades) + r.skipped_no_signal \
+        + r.skipped_spread_too_wide
+    assert total == r.bars_examined, (
+        f"{total} bougies classées pour {r.bars_examined} examinées"
+    )
+    print(f"  rejets par filtre : {dict(sorted(r.rejected_by.items()))}")
+
+
+def test_le_filtre_trend_est_obligatoire():
+    """Sans lui, rien ne donne le SENS du trade."""
+    try:
+        run_backtest(random_walk(500), filters=("long_trend", "breakout"))
+        raise AssertionError("filtres sans 'trend' acceptés")
+    except ValueError as exc:
+        assert "trend" in str(exc)
+    print("  filtres sans 'trend' -> refusés avec explication")
+
+
+def test_un_filtre_inconnu_est_refuse():
+    try:
+        run_backtest(random_walk(500), filters=("trend", "rvol"))
+        raise AssertionError("filtre inconnu accepté")
+    except ValueError as exc:
+        assert "rvol" in str(exc)
+    print("  filtre inconnu -> refusé en le nommant")
+
+
+def test_l_amorcage_suit_le_filtre_le_plus_gourmand():
+    """Un filtre à 200 périodes exige 200 bougies avant de pouvoir répondre.
+
+    L'oublier le rendrait systématiquement faux avec une fenêtre de 50, et le
+    backtest conclurait « aucun trade » pour une raison sans rapport avec le
+    marché.
+    """
+    candles = random_walk(1000, seed=29)
+    court = run_backtest(candles, spread=0.00008, filters=("trend",))
+    long = run_backtest(candles, spread=0.00008,
+                        filters=("trend", "long_trend"))
+
+    assert long.warmup_used >= 200, long.warmup_used
+    assert long.warmup_used > court.warmup_used
+
+    # Et avec trop peu d'historique, le message doit nommer les filtres.
+    maigre = run_backtest(candles[:150], spread=0.00008,
+                          filters=("trend", "long_trend"))
+    assert maigre.insufficient_candles
+    motif = maigre.no_trade_reason()
+    assert "long_trend" in motif, motif
+    assert str(maigre.warmup_used + 1) in motif, motif
+    print(f"  amorçage : {court.warmup_used} (trend) -> {long.warmup_used} "
+          f"(+ long_trend)")

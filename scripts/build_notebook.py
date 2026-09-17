@@ -341,6 +341,67 @@ print("c'est la seule période que la stratégie n'a pas eu l'occasion de")
 print("flatter. Et si tu relances cette cellule après avoir changé un réglage,")
 print("la validation n'en est plus une.")"""),
 
+md("""## 4 quater. La sélectivité change-t-elle quelque chose ?
+
+Le diagnostic mesuré était « on prend presque tout ce qui passe » : une entrée
+toutes les douze bougies, sur un seul signal. L'idée reprise d'une stratégie
+d'actions est l'inverse — n'entrer que quand **plusieurs** conditions
+indépendantes s'alignent.
+
+Trois de ses filtres sont transposables ; deux ne le sont pas et il faut le
+dire. Le **gap d'ouverture ≥ 3 %** n'existe pas sur le Forex hors week-end. Le
+**volume relatif ≥ 2x** est impossible : nos bougies n'ont pas de volume, et
+le volume du Forex de gré à gré n'est pas centralisé. Il est remplacé par une
+expansion de volatilité — même intuition (« il se passe quelque chose
+d'inhabituel »), mais **pas la même mesure**.
+
+Sur données synthétiques, le résultat est sans ambiguïté :
+
+| | bruit pur | légère tendance |
+|---|---|---|
+| 1 filtre | −0,394 / trade | +0,069 / trade |
+| 3 filtres | −0,481 / trade | **+0,723 / trade** |
+
+**La sélectivité amplifie un avantage qui existe ; elle n'en crée pas.** Sur du
+bruit, le gain par trade empire. Et au 4e filtre il ne reste qu'une vingtaine
+de trades : plus rien n'est démontrable, quel que soit le résultat.
+"""),
+code("""JEUX_DE_FILTRES = [
+    ("trend",),
+    ("trend", "long_trend"),
+    ("trend", "long_trend", "breakout"),
+    ("trend", "long_trend", "breakout", "volatility"),
+]
+
+for g in INTERVALLES:
+    print(f"=== {g} — spread {SPREAD_REEL*10000:.1f} pip ===")
+    print(f"{'filtres':>8}{'trades':>8}{'réussite':>10}{'seuil':>8}{'P/L':>10}"
+          f"{'/trade':>9}{'p':>8}  verdict")
+    for jeu in JEUX_DE_FILTRES:
+        r = run_backtest(
+            historique[g], instrument=INSTRUMENT, granularity=g,
+            spread=SPREAD_REEL, reward_ratio=1.5, risk_amount=2.5,
+            financing_rate_annual=0.02, filters=jeu,
+        )
+        if not r.closed:
+            print(f"{len(jeu):>8}  aucun trade — {r.no_trade_reason()[:60]}")
+            continue
+        print(f"{len(jeu):>8}{len(r.closed):>8}{r.win_rate:>9.1%}"
+              f"{r.breakeven_win_rate:>8.1%}{r.net_pl:>+10.2f}"
+              f"{r.expectancy:>+9.3f}{r.p_value:>8.1%}  {r.verdict}")
+        if r.rejected_by:
+            detail = ", ".join(f"{k}: {v}" for k, v in sorted(r.rejected_by.items()))
+            print(f"          rejets -> {detail}")
+    print()
+
+print("Lis la colonne « /trade », pas le P/L total.")
+print("Filtrer réduit mécaniquement le P/L total puisqu'on trade moins : un")
+print("P/L moins négatif ne prouve donc rien. Ce qui compte est le gain MOYEN")
+print("par trade — c'est lui qui dit si la qualité des entrées s'améliore.")
+print()
+print("Et méfie-toi de la dernière ligne : très peu de trades rend n'importe")
+print("quel chiffre indémontrable, y compris un bon.")"""),
+
 md("""## 5. Le verdict
 
 Une lecture directe, sans enrobage — mais **prudente sur trois points** qui

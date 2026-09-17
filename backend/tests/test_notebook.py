@@ -332,6 +332,7 @@ def test_les_cellules_de_backtest_s_executent_vraiment(capsys):
     backtest = cellule_contenant("SPREADS", "fetch_history")
     baseline = cellule_contenant("entry_mode", "TIRAGES")
     strategies = cellule_contenant("split_history")
+    selectivite = cellule_contenant("JEUX_DE_FILTRES")
     verdict = cellule_contenant("Verdict", "no_trade_reason")
 
     for marche_ouvert in (True, False):
@@ -340,6 +341,7 @@ def test_les_cellules_de_backtest_s_executent_vraiment(capsys):
         _executer(backtest, espace)
         _executer(baseline, espace)
         _executer(strategies, espace)
+        _executer(selectivite, espace)
         _executer(verdict, espace)
 
         sortie = capsys.readouterr().out

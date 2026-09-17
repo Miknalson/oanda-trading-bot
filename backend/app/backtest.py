@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 
 from .analysis import ATR_STOP_MULTIPLIER
 from .broker import BrokerError, Candle
+from .filters import CONFIRMATIONS, window_needed
 from .indicators import atr, trend_direction
 
 # Périodes des indicateurs — doivent rester alignées sur indicators.py.
@@ -195,6 +196,14 @@ class BacktestResult:
     # souvent l'inverse exactement : un marché trop cher pour y entrer.
     bars_examined: int = 0
     skipped_no_signal: int = 0
+    # Combien de fois chaque filtre a bloqué une entrée. Sans ce décompte on
+    # ne saurait pas lequel fait le travail — ni lequel refuse tout.
+    rejected_by: dict[str, int] = field(default_factory=dict)
+    filters: tuple[str, ...] = ("trend",)
+    # Bougies consommées avant le premier signal possible. Dépend des filtres
+    # actifs — un filtre à 200 périodes en exige 200 — donc citer la constante
+    # WARMUP dans les messages donnerait un chiffre faux.
+    warmup_used: int = WARMUP
     skipped_spread_too_wide: int = 0
     insufficient_candles: bool = False
 
@@ -277,8 +286,8 @@ class BacktestResult:
         if self.insufficient_candles:
             return (
                 f"pas assez d'historique — {self.candles} bougies reçues, il en "
-                f"faut plus de {WARMUP + 1} pour amorcer les indicateurs "
-                f"(SMA {SLOW_PERIOD}, ATR {ATR_PERIOD})"
+                f"faut plus de {self.warmup_used + 1} pour amorcer les filtres "
+                f"{list(self.filters)}"
             )
         if self.still_open:
             return (
@@ -290,6 +299,10 @@ class BacktestResult:
             return "aucune bougie examinée"
 
         motifs = []
+        for nom, combien in sorted(
+            self.rejected_by.items(), key=lambda kv: -kv[1]
+        ):
+            motifs.append(f"{combien} entrées refusées par le filtre « {nom} »")
         if self.skipped_spread_too_wide:
             motifs.append(
                 f"{self.skipped_spread_too_wide} entrées refusées car le spread "
@@ -443,6 +456,7 @@ def run_backtest(
     entry_mode: str = "signal",
     exit_mode: str = "fixed",
     trail_multiplier: float = 2.0,
+    filters: tuple[str, ...] = ("trend",),
     seed: int = 0,
 ) -> BacktestResult:
     """Rejoue la stratégie bougie par bougie, sans regard vers le futur.
@@ -467,6 +481,18 @@ def run_backtest(
         raise ValueError(f"entry_mode inconnu : {entry_mode!r} (signal ou random)")
     if exit_mode not in ("fixed", "trailing"):
         raise ValueError(f"exit_mode inconnu : {exit_mode!r} (fixed ou trailing)")
+    if "trend" not in filters:
+        raise ValueError(
+            "le filtre 'trend' est obligatoire : c'est lui qui donne le SENS "
+            "du trade, les autres ne font que le confirmer."
+        )
+
+    # La fenêtre doit couvrir le filtre le plus gourmand. L'oublier rendrait un
+    # filtre à 200 périodes systématiquement faux avec une fenêtre de 50, et le
+    # backtest conclurait « aucun trade » pour une raison sans rapport avec le
+    # marché.
+    fenetre_requise = max(INDICATOR_WINDOW, window_needed(filters))
+    amorcage = fenetre_requise + 1
     tirage = random.Random(seed)
     result = BacktestResult(
         instrument=instrument,
@@ -479,17 +505,19 @@ def run_backtest(
         max_spread_ratio=max_spread_ratio,
         entry_mode=entry_mode,
         exit_mode=exit_mode,
+        filters=filters,
+        warmup_used=amorcage,
     )
 
     bar_hours = GRANULARITY_HOURS.get(granularity, 1.0)
 
-    if len(candles) <= WARMUP + 1:
+    if len(candles) <= amorcage + 1:
         result.insufficient_candles = True
         return result
 
     open_trade: BacktestTrade | None = None
 
-    for i in range(WARMUP, len(candles) - 1):
+    for i in range(amorcage, len(candles) - 1):
         # --- Position ouverte : le stop ou l'objectif est-il touché ? ---
         if open_trade is not None:
             bar = candles[i]
@@ -588,7 +616,7 @@ def run_backtest(
         # découperait la fin du tableau, c'est-à-dire des bougies FUTURES.
         # Le regard vers le futur est l'erreur qui rend un backtest
         # flatteur et faux, et elle se glisserait ici sans rien casser.
-        debut = max(0, i + 1 - INDICATOR_WINDOW)
+        debut = max(0, i + 1 - fenetre_requise)
         fenetre = candles[debut : i + 1]
         closes = [c.close for c in fenetre]
         direction = trend_direction(closes, FAST_PERIOD, SLOW_PERIOD)
@@ -609,6 +637,19 @@ def run_backtest(
         # trade, et il ne faut pas la lire comme telle.
         if entry_mode == "random":
             direction = "buy" if tirage.random() < 0.5 else "sell"
+
+        # Filtres de confirmation : TOUS doivent être d'accord. C'est là que se
+        # joue la sélectivité — un signal fréquent devient un signal rare.
+        rejete = None
+        for nom in filters:
+            if nom == "trend":
+                continue  # déjà appliqué : c'est lui qui donne la direction
+            if not CONFIRMATIONS[nom](fenetre, direction):
+                rejete = nom
+                break
+        if rejete is not None:
+            result.rejected_by[rejete] = result.rejected_by.get(rejete, 0) + 1
+            continue
 
         stop_distance = atr_value * ATR_STOP_MULTIPLIER
         if spread / stop_distance > max_spread_ratio:  # même refus qu'en production
