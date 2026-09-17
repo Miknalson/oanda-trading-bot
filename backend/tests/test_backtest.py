@@ -799,3 +799,126 @@ def test_l_amorcage_suit_le_filtre_le_plus_gourmand():
     assert str(maigre.warmup_used + 1) in motif, motif
     print(f"  amorçage : {court.warmup_used} (trend) -> {long.warmup_used} "
           f"(+ long_trend)")
+
+
+def synthetic_histories(n_instruments, bougies=3000, drift=0.0, seed0=100):
+    """Plusieurs instruments indépendants, même régime de marché."""
+    histoires, spreads = {}, {}
+    for k in range(n_instruments):
+        rng = random.Random(seed0 + k)
+        serie, prix = [], 1.10
+        for _ in range(bougies):
+            o = prix
+            c = prix + drift + rng.gauss(0, 0.0006)
+            serie.append(candle(o, max(o, c) + abs(rng.gauss(0, 0.0003)),
+                                min(o, c) - abs(rng.gauss(0, 0.0003)), c))
+            prix = c
+        histoires[f"PAIR_{k}"] = serie
+        spreads[f"PAIR_{k}"] = 0.00012
+    return histoires, spreads
+
+
+def test_l_agregat_additionne_tous_les_trades():
+    """L'agrégat doit être la somme, pas une moyenne de moyennes."""
+    from app.backtest import run_pooled_backtest
+
+    histoires, spreads = synthetic_histories(5)
+    pool = run_pooled_backtest(histoires, spreads, granularity="H1")
+
+    attendu = sum(len(r.closed) for r in pool.results)
+    assert len(pool.trades) == attendu
+    assert abs(pool.net_pl - sum(r.net_pl for r in pool.results)) < 1e-9
+    assert pool.wins == sum(r.wins for r in pool.results)
+    # L'échantillon agrégé doit être franchement plus grand que le meilleur seul.
+    plus_gros = max(len(r.closed) for r in pool.results)
+    assert len(pool.trades) > plus_gros * 2
+    print(f"  5 instruments -> {len(pool.trades)} trades agrégés "
+          f"(le plus gros seul : {plus_gros})")
+
+
+def test_l_agregat_ne_se_laisse_pas_berner_par_la_meilleure_case():
+    """Le cœur du garde-fou : sans avantage réel, l'agrégat doit rester muet.
+
+    Avec dix instruments sans avantage, il s'en trouvera forcément un qui
+    paraît bon. L'agrégat, lui, ne doit pas conclure — et la correction du
+    nombre d'essais doit désamorcer la meilleure case.
+    """
+    from app.backtest import run_pooled_backtest
+
+    histoires, spreads = synthetic_histories(10, drift=0.0)
+    pool = run_pooled_backtest(histoires, spreads, granularity="H1",
+                               financing_rate_annual=0.0)
+
+    meilleur = pool.best_instrument()
+    assert meilleur is not None
+    nom, r = meilleur
+
+    # Il y a bien une case flatteuse : c'est tout l'intérêt du test.
+    assert r.expectancy > pool.expectancy, (
+        "aucune case ne dépasse l'agrégat : le piège n'est pas reproduit"
+    )
+    ajustee = pool.best_p_value_adjusted()
+    assert ajustee > r.p_value or r.p_value >= 0.05, (
+        "la correction du nombre d'essais n'a rien durci"
+    )
+    assert pool.verdict != "RENTABLE", (
+        f"l'agrégat conclut RENTABLE sur du bruit pur : {pool.summary()}"
+    )
+    print(
+        f"  10 instruments sans avantage : meilleur = {nom} "
+        f"({r.expectancy:+.3f}/trade, p brute {r.p_value:.1%} -> corrigée "
+        f"{ajustee:.1%}) ; agrégat = {pool.verdict}"
+    )
+
+
+def test_l_agregat_detecte_un_avantage_reel_partage():
+    """Contrôle positif : si l'avantage existe partout, l'agrégat doit le voir.
+
+    Sans ce contrôle, un agrégat cassé qui répondrait toujours
+    « NON CONCLUANT » ferait abandonner à tort une stratégie qui marche.
+    """
+    from app.backtest import run_pooled_backtest
+
+    histoires, spreads = synthetic_histories(8, drift=0.00012)
+    pool = run_pooled_backtest(histoires, spreads, granularity="H1",
+                               financing_rate_annual=0.0)
+
+    assert pool.expectancy > 0, pool.summary()
+    assert pool.verdict == "RENTABLE", pool.summary()
+    assert pool.p_value < 0.01, pool.p_value
+    print(f"  avantage réel partagé : {len(pool.trades)} trades, "
+          f"{pool.expectancy:+.3f}/trade, p = {pool.p_value:.2%} -> {pool.verdict}")
+
+
+def test_le_resume_agrege_avertit_du_piege():
+    from app.backtest import run_pooled_backtest
+
+    histoires, spreads = synthetic_histories(6)
+    resume = run_pooled_backtest(histoires, spreads, granularity="H1").summary()
+
+    assert "AGRÉGAT" in resume
+    assert "VERDICT" in resume
+    assert "meilleur instrument" in resume
+    assert "pas pour le suivre" in resume
+    print("  le résumé nomme le meilleur ET dit pourquoi ne pas le suivre")
+
+
+def test_l_agregat_sans_trade_nomme_la_cause():
+    """« Aucun trade partout » désigne la configuration, pas le marché.
+
+    Un motif identique sur tous les instruments à la fois ne peut pas venir du
+    marché : c'est un filtre ou un spread qui refuse tout. Le taire ferait
+    chercher un problème de stratégie là où il y a un problème de réglage.
+    """
+    from app.backtest import run_pooled_backtest
+
+    histoires, spreads = synthetic_histories(4)
+    ruineux = {nom: 0.05 for nom in spreads}  # spread absurde : tout refusé
+    pool = run_pooled_backtest(histoires, ruineux, granularity="H1")
+
+    assert not pool.trades
+    resume = pool.summary()
+    assert "AGRÉGAT" in resume
+    assert "spread" in resume and "trop cher" in resume
+    assert "désigne la configuration" in resume
+    print(f"  aucun trade partout -> « {resume.splitlines()[-1].strip()} »")

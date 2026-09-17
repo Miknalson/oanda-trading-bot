@@ -301,6 +301,12 @@ def _courtier_factice(marche_ouvert: bool):
 
         async def get_candles(self, instrument, granularity, count, before=None):
             self.appels += 1
+            # Deux paires indisponibles : un vrai compte n'a pas tout, et la
+            # cellule d'agrégat doit le traverser sans échouer. Sans ça, son
+            # `except` n'est jamais évalué et une faute s'y cacherait.
+            if instrument in ("NZD_USD", "EUR_GBP"):
+                from app.broker import BrokerError
+                raise BrokerError(f"{instrument} indisponible sur ce compte")
             dispo = self._construire(granularity)
             if before:
                 dispo = [c for c in dispo if c.time < before]
@@ -333,6 +339,7 @@ def test_les_cellules_de_backtest_s_executent_vraiment(capsys):
     baseline = cellule_contenant("entry_mode", "TIRAGES")
     strategies = cellule_contenant("split_history")
     selectivite = cellule_contenant("JEUX_DE_FILTRES")
+    agregat = cellule_contenant("run_pooled_backtest")
     verdict = cellule_contenant("Verdict", "no_trade_reason")
 
     for marche_ouvert in (True, False):
@@ -342,12 +349,19 @@ def test_les_cellules_de_backtest_s_executent_vraiment(capsys):
         _executer(baseline, espace)
         _executer(strategies, espace)
         _executer(selectivite, espace)
+        _executer(agregat, espace)
         _executer(verdict, espace)
 
         sortie = capsys.readouterr().out
         assert "Traceback" not in sortie
         assert "Verdict" in sortie, sortie[-500:]
 
+        # La cellule d'agrégat doit avoir survécu aux paires indisponibles.
+        assert "indisponible" in sortie or "ignorée" in sortie, (
+            "les paires en erreur n'ont pas été signalées"
+        )
+        # Soit un verdict, soit un motif — jamais un silence.
+        assert "AGRÉGAT" in sortie, "l'agrégat n'a produit ni verdict ni motif"
         assert espace["courtier"].appels > 2, (
             f"{espace['courtier'].appels} requêtes — le carnet n'a pas paginé"
         )

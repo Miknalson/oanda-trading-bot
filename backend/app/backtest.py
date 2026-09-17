@@ -692,6 +692,173 @@ def run_backtest(
     return result
 
 
+@dataclass
+class PooledResult:
+    """Résultat agrégé sur plusieurs instruments — une seule mesure.
+
+    Tester dix instruments et retenir le meilleur est la façon la plus
+    efficace de se mentir : avec dix cases et aucun avantage réel, on en
+    trouve forcément une qui brille. On l'a mesuré — avec huit cases sans
+    aucun avantage, 99,6 % des univers en contiennent au moins une positive,
+    et quatre en moyenne.
+
+    L'agrégation fait l'inverse. Mettre TOUS les trades de TOUS les
+    instruments dans un seul panier multiplie la taille d'échantillon au lieu
+    de multiplier les occasions de se tromper. Une seule question, une seule
+    réponse : cette famille de stratégies a-t-elle une espérance positive ?
+
+    La ventilation par instrument est conservée, mais pour le diagnostic
+    seulement. Ce n'est PAS un menu dans lequel choisir.
+    """
+
+    per_instrument: dict[str, BacktestResult] = field(default_factory=dict)
+
+    @property
+    def results(self) -> list[BacktestResult]:
+        return list(self.per_instrument.values())
+
+    @property
+    def trades(self) -> list[BacktestTrade]:
+        return [t for r in self.results for t in r.closed]
+
+    @property
+    def wins(self) -> int:
+        return sum(1 for t in self.trades if t.won)
+
+    @property
+    def win_rate(self) -> float:
+        return self.wins / len(self.trades) if self.trades else 0.0
+
+    @property
+    def net_pl(self) -> float:
+        return sum(t.pl for t in self.trades)
+
+    @property
+    def expectancy(self) -> float:
+        return self.net_pl / len(self.trades) if self.trades else 0.0
+
+    @property
+    def breakeven_win_rate(self) -> float:
+        """Seuil moyen, pondéré par le nombre de trades de chaque instrument."""
+        actifs = [r for r in self.results if r.closed]
+        if not actifs:
+            return 0.5
+        total = sum(len(r.closed) for r in actifs)
+        return sum(r.breakeven_win_rate * len(r.closed) for r in actifs) / total
+
+    @property
+    def p_value(self) -> float:
+        """Significativité de l'AGRÉGAT — la seule qui décide."""
+        n = len(self.trades)
+        if n == 0:
+            return 1.0
+        seuil = self.breakeven_win_rate
+        if self.wins <= n * seuil:
+            return binomial_tail_p(n, self.wins, seuil)
+        return 1.0 - binomial_tail_p(n, self.wins - 1, seuil)
+
+    @property
+    def verdict(self) -> str:
+        if not self.trades:
+            return "AUCUN TRADE"
+        if self.p_value >= SIGNIFICANCE:
+            return "NON CONCLUANT"
+        return "RENTABLE" if self.expectancy > 0 else "PERDANT"
+
+    def best_instrument(self) -> tuple[str, BacktestResult] | None:
+        """Le meilleur instrument — pour montrer le piège, pas pour le suivre."""
+        actifs = [(nom, r) for nom, r in self.per_instrument.items() if r.closed]
+        if not actifs:
+            return None
+        return max(actifs, key=lambda kv: kv[1].expectancy)
+
+    def best_p_value_adjusted(self) -> float | None:
+        """Significativité du meilleur instrument, CORRIGÉE du nombre d'essais.
+
+        Regarder N instruments puis n'en retenir qu'un, c'est faire N tirages
+        et ne garder que le plus favorable. La probabilité que le meilleur
+        paraisse bon par hasard grandit donc avec N, et la p-value brute ne
+        veut plus rien dire telle quelle. Correction de Bonferroni :
+        volontairement conservatrice, et surtout facile à expliquer.
+        """
+        meilleur = self.best_instrument()
+        if meilleur is None:
+            return None
+        testes = sum(1 for r in self.results if r.closed)
+        return min(1.0, meilleur[1].p_value * testes)
+
+    def summary(self) -> str:
+        n = len(self.trades)
+        if n == 0:
+            # Ne jamais rendre une ligne vide muette : « aucun trade » sur tous
+            # les instruments à la fois ressemble à un marché sans opportunité,
+            # alors que la cause est presque toujours la même pour tous — un
+            # filtre ou un spread qui refuse tout. Le taire ferait chercher du
+            # côté de la stratégie un problème de configuration.
+            lignes = ["AGRÉGAT — aucun trade sur aucun des "
+                      f"{len(self.per_instrument)} instruments.", ""]
+            motifs: dict[str, list[str]] = {}
+            for nom, r in sorted(self.per_instrument.items()):
+                motifs.setdefault(r.no_trade_reason(), []).append(nom)
+            for motif, noms in motifs.items():
+                lignes.append(f"  {', '.join(noms)} :")
+                lignes.append(f"    {motif}")
+            if len(motifs) == 1:
+                lignes += [
+                    "",
+                    "  Un motif identique partout désigne la configuration, pas",
+                    "  le marché : filtres trop stricts, spread trop large, ou",
+                    "  historique trop court.",
+                ]
+            return "\n".join(lignes)
+
+        lignes = [
+            f"AGRÉGAT — {len(self.per_instrument)} instruments, {n} trades",
+            f"  taux de réussite: {self.win_rate:.1%}  "
+            f"(seuil d'équilibre {self.breakeven_win_rate:.1%})",
+            f"  P/L net         : {self.net_pl:+.2f}",
+            f"  par trade       : {self.expectancy:+.3f}",
+            f"  malchance ?     : {self.p_value:.2%}",
+            f"  VERDICT         : {self.verdict}",
+        ]
+
+        meilleur = self.best_instrument()
+        if meilleur is not None:
+            nom, r = meilleur
+            ajustee = self.best_p_value_adjusted()
+            lignes += [
+                "",
+                f"Le meilleur instrument est {nom} ({r.expectancy:+.3f}/trade, "
+                f"p brute {r.p_value:.1%}).",
+                f"Corrigée du nombre d'essais : p = {ajustee:.1%}"
+                + ("  -> rien de démontré." if ajustee >= SIGNIFICANCE else "."),
+                "Ce chiffre existe pour montrer le piège, pas pour le suivre :",
+                "choisir le meilleur d'une liste, c'est garder le tirage le plus",
+                "favorable et appeler ça un résultat.",
+            ]
+        return "\n".join(lignes)
+
+
+def run_pooled_backtest(
+    histories: dict[str, list[Candle]],
+    spreads: dict[str, float],
+    **kwargs,
+) -> PooledResult:
+    """Rejoue la MÊME stratégie sur plusieurs instruments, et agrège.
+
+    Le dimensionnement par le risque (`risk_amount` identique partout) rend
+    les trades comparables d'un instrument à l'autre : chacun risque le même
+    montant, quelle que soit la paire. Sans ça, agréger des P/L exprimés dans
+    des échelles différentes n'aurait aucun sens.
+    """
+    agrege = PooledResult()
+    for nom, bougies in histories.items():
+        agrege.per_instrument[nom] = run_backtest(
+            bougies, instrument=nom, spread=spreads[nom], **kwargs
+        )
+    return agrege
+
+
 def split_history(
     candles: list[Candle], *, validation_fraction: float = 0.3
 ) -> tuple[list[Candle], list[Candle]]:

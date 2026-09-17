@@ -402,6 +402,83 @@ print()
 print("Et méfie-toi de la dernière ligne : très peu de trades rend n'importe")
 print("quel chiffre indémontrable, y compris un bon.")"""),
 
+md("""## 4 quinquies. La dernière question : est-ce l'EUR/USD, ou la stratégie ?
+
+Tout ce qui précède porte sur **une seule paire**. On ne peut donc pas
+distinguer deux explications très différentes : l'EUR/USD n'offre aucun
+avantage, ou cette famille de stratégies n'en a aucun nulle part.
+
+Plusieurs instruments y répondent — **à condition de ne pas retenir le
+meilleur**. Avec dix cases et aucun avantage réel, il s'en trouve forcément
+une qui brille : on l'a mesuré, 99,6 % des univers sans avantage contiennent
+au moins une case positive, et quatre en moyenne.
+
+L'agrégation fait l'inverse du cherry-picking : **tous les trades de tous les
+instruments dans un seul panier**. Ça multiplie la taille d'échantillon au
+lieu de multiplier les occasions de se tromper. Une question, une réponse.
+
+**Configuration déclarée à l'avance**, et c'est essentiel : le signal de base,
+sortie à objectif fixe, spread réel de chaque paire. Pas de balayage, pas de
+variantes. Choisir la configuration *après* avoir vu les résultats
+reviendrait à refaire exactement l'erreur que cette cellule existe pour
+éviter.
+
+Le tableau par instrument est affiché pour le diagnostic. **Ce n'est pas un
+menu.**
+"""),
+code("""from app.backtest import run_pooled_backtest
+# Importé ici et pas seulement en cellule 3 : cette cellule ne doit pas
+# dépendre de l'ordre d'exécution. Un `except` sur un nom indéfini ne se voit
+# qu'au moment où une exception survient — donc précisément quand tout va mal.
+from app.broker import BrokerError
+
+# Déclarés AVANT de regarder quoi que ce soit.
+PAIRES = ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD",
+          "USD_CHF", "USD_CAD", "NZD_USD", "EUR_GBP"]
+INTERVALLE_POOL = "H1"
+BOUGIES_POOL = 4000
+FILTRES_POOL = ("trend",)
+
+histoires, spreads_pool = {}, {}
+for paire in PAIRES:
+    try:
+        bougies = await fetch_history(courtier, paire, INTERVALLE_POOL, BOUGIES_POOL)
+        cotation = await courtier.get_quote(paire)
+        if not bougies:
+            print(f"  {paire:<9} ignorée — aucune bougie renvoyée")
+            continue
+        histoires[paire] = bougies
+        spreads_pool[paire] = cotation.spread
+        print(f"  {paire:<9} {len(bougies):>5} bougies, spread "
+              f"{cotation.spread:.5f}")
+    except BrokerError as e:
+        # Une paire indisponible ne doit pas faire échouer toute la mesure.
+        print(f"  {paire:<9} ignorée — {str(e)[:70]}")
+
+print()
+if len(histoires) < 3:
+    print("❌ Moins de trois instruments disponibles : l'agrégat n'aurait pas")
+    print("   plus de valeur qu'une mesure sur une seule paire.")
+else:
+    pool = run_pooled_backtest(
+        histoires, spreads_pool, granularity=INTERVALLE_POOL,
+        reward_ratio=1.5, risk_amount=2.5, financing_rate_annual=0.02,
+        filters=FILTRES_POOL,
+    )
+
+    print(f"{'instrument':<11}{'trades':>8}{'réussite':>10}{'P/L':>10}{'/trade':>9}")
+    print("-" * 48)
+    for nom, r in sorted(pool.per_instrument.items()):
+        if not r.closed:
+            print(f"{nom:<11}  aucun trade — {r.no_trade_reason()[:40]}")
+            continue
+        print(f"{nom:<11}{len(r.closed):>8}{r.win_rate:>9.1%}"
+              f"{r.net_pl:>+10.2f}{r.expectancy:>+9.3f}")
+    print("-" * 48)
+    print("(diagnostic seulement — ce tableau n'est pas un menu)")
+    print()
+    print(pool.summary())"""),
+
 md("""## 5. Le verdict
 
 Une lecture directe, sans enrobage — mais **prudente sur trois points** qui
